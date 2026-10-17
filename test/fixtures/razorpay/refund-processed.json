@@ -1,0 +1,16 @@
+{
+  "account_id": "acc_test",
+  "created_at": 1797000000,
+  "event": "refund.processed",
+  "payload": {
+    "refund": {
+      "entity": {
+        "id": "rfnd_test",
+        "payment_id": "pay_test",
+        "amount": 1500,
+        "currency": "INR",
+        "status": "processed"
+      }
+    }
+  }
+}

@@ -1,0 +1,17 @@
+model AbuseReport {
+  id         String            @id @default(cuid())
+  reporterId String?
+  secretId   String?
+  reason     String
+  details    String?
+  status     AbuseReportStatus @default(pending)
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @updatedAt
+
+  reporter User?   @relation("ReportReporter", fields: [reporterId], references: [id], onDelete: SetNull)
+  secret   Secret? @relation(fields: [secretId], references: [id], onDelete: SetNull)
+
+  @@index([status, createdAt])
+  @@index([reporterId])
+  @@index([secretId])
+}

@@ -1,0 +1,29 @@
+model User {
+  id                      String    @id @default(cuid())
+  email                   String    @unique
+  passwordHash            String
+  cognitoSubject          String?   @unique
+  plan                    UserPlan  @default(free)
+  emailVerifiedAt         DateTime?
+  notificationPreferences Json      @default("{}")
+  deletedAt               DateTime?
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
+
+  adminUser           AdminUser?
+  createdTeams        Team[]           @relation("TeamCreator")
+  teamMembers         TeamMember[]
+  secrets             Secret[]
+  auditEvents         AuditEvent[]     @relation("AuditActor")
+  notifications       Notification[]
+  apiKeys             ApiKey[]
+  subscriptions       Subscription[]
+  invoices            Invoice[]
+  billingRefunds      BillingRefund[]
+  policies            Policy[]         @relation("UserPolicies")
+  abuseReports        AbuseReport[]    @relation("ReportReporter")
+  emailOtps           EmailOtp[]
+  sentTeamInvitations TeamInvitation[] @relation("TeamInvitationInviter")
+
+  @@index([createdAt])
+}

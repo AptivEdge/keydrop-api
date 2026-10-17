@@ -1,0 +1,16 @@
+{
+  "account_id": "acc_test",
+  "created_at": 1797000000,
+  "event": "payment.failed",
+  "payload": {
+    "payment": {
+      "entity": {
+        "id": "pay_failed_test",
+        "invoice_id": "inv_test",
+        "subscription_id": "sub_test",
+        "amount": 1500,
+        "currency": "INR"
+      }
+    }
+  }
+}

@@ -1,0 +1,10 @@
+services:
+  db:
+    image: postgres
+    ports:
+      - '7432:7432'
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: keydrop
+    command: -p 7432

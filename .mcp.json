@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "razorpay-remote": {
+      "command": "npx",
+      "args": [
+        "mcp-remote",
+        "https://mcp.razorpay.com/mcp",
+        "--header",
+        "Authorization: Basic cnpwX3Rlc3RfVG9Qd0tBUldKbWJOOXo6YXJoVzNneTAwRlgyOHNnOGR6TVN2TUN0Cg=="
+      ]
+    }
+  }
+}

@@ -1,0 +1,28 @@
+model Team {
+  id        String   @id @default(cuid())
+  name      String
+  createdBy String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  creator     User             @relation("TeamCreator", fields: [createdBy], references: [id], onDelete: Restrict)
+  members     TeamMember[]
+  policies    Policy[]         @relation("TeamPolicies")
+  invitations TeamInvitation[]
+
+  @@index([createdBy])
+}
+
+model TeamMember {
+  id        String   @id @default(cuid())
+  teamId    String
+  userId    String
+  role      TeamRole @default(member)
+  createdAt DateTime @default(now())
+
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([teamId, userId])
+  @@index([userId])
+}

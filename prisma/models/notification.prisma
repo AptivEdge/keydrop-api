@@ -1,0 +1,20 @@
+model Notification {
+  id                 String           @id @default(cuid())
+  userId             String
+  secretId           String?
+  type               NotificationType
+  payload            Json?
+  dedupeKey          String?          @unique
+  emailSentAt        DateTime?
+  emailAttempts      Int              @default(0)
+  emailNextAttemptAt DateTime         @default(now())
+  readAt             DateTime?
+  createdAt          DateTime         @default(now())
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  secret Secret? @relation(fields: [secretId], references: [id], onDelete: SetNull)
+
+  @@index([userId, readAt, createdAt])
+  @@index([secretId])
+  @@index([emailSentAt, emailNextAttemptAt, createdAt])
+}

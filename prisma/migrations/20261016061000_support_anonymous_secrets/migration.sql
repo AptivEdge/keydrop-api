@@ -1,0 +1,1 @@
+ALTER TABLE "Secret" ALTER COLUMN "ownerId" DROP NOT NULL;

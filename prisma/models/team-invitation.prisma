@@ -1,0 +1,18 @@
+model TeamInvitation {
+  id         String    @id @default(cuid())
+  teamId     String
+  inviterId  String
+  email      String
+  tokenHash  String    @unique
+  role       TeamRole  @default(member)
+  expiresAt  DateTime
+  acceptedAt DateTime?
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+
+  team    Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  inviter User @relation("TeamInvitationInviter", fields: [inviterId], references: [id], onDelete: Cascade)
+
+  @@index([teamId, email, createdAt])
+  @@index([expiresAt])
+}

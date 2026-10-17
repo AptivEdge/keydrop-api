@@ -1,0 +1,14 @@
+model File {
+  id          String    @id @default(cuid())
+  secretId    String
+  storageRef  String
+  filename    String?
+  contentType String?
+  sizeBytes   BigInt?
+  uploadedAt  DateTime?
+  createdAt   DateTime  @default(now())
+
+  secret Secret @relation(fields: [secretId], references: [id], onDelete: Cascade)
+
+  @@index([secretId])
+}

@@ -1,0 +1,97 @@
+enum UserPlan {
+  free
+  pro
+  team
+}
+
+enum AdminRole {
+  SUP
+  TS
+  BIL
+  ENG
+  ADM
+  AUD
+}
+
+enum TeamRole {
+  owner
+  admin
+  member
+}
+
+enum SecretStatus {
+  active
+  viewed
+  expired
+  revoked
+}
+
+enum RequestStatus {
+  pending
+  approved
+  denied
+}
+
+enum NotificationType {
+  secret_created
+  secret_viewed
+  secret_expiring
+  secret_expired
+  access_requested
+  access_granted
+  access_denied
+  billing_payment_failed
+}
+
+enum SubscriptionStatus {
+  active
+  trialing
+  past_due
+  canceled
+  incomplete
+}
+
+enum InvoiceStatus {
+  draft
+  open
+  paid
+  void
+  uncollectible
+}
+
+enum BillingInterval {
+  monthly
+  yearly
+}
+
+enum PolicyType {
+  secret_expiration
+  access_control
+  view_limit
+  team_security
+  retention
+  custom
+}
+
+enum AbuseReportStatus {
+  pending
+  reviewing
+  resolved
+  dismissed
+}
+
+enum AuditEventType {
+  secret_created
+  secret_viewed
+  secret_revoked
+  secret_expired
+  access_requested
+  access_granted
+  access_denied
+  passphrase_failed
+  api_key_created
+  api_key_revoked
+  policy_updated
+  abuse_reported
+  billing_refunded
+}

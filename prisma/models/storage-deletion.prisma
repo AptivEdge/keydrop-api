@@ -1,0 +1,15 @@
+model StorageDeletion {
+  id          String    @id @default(cuid())
+  secretId    String?
+  storageRef  String
+  attempts    Int       @default(0)
+  nextRetryAt DateTime  @default(now())
+  lastError   String?
+  deletedAt   DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([storageRef])
+  @@index([nextRetryAt, deletedAt])
+  @@index([secretId])
+}

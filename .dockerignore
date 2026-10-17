@@ -1,0 +1,12 @@
+.git
+node_modules
+**/node_modules
+.env
+.env.*
+infra/.terraform
+infra/*.tfstate
+infra/*.tfstate.*
+infra/*.tfplan
+logs
+coverage
+dist

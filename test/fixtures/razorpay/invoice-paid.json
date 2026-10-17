@@ -1,0 +1,19 @@
+{
+  "account_id": "acc_test",
+  "created_at": 1797000000,
+  "event": "invoice.paid",
+  "payload": {
+    "invoice": {
+      "entity": {
+        "id": "inv_test",
+        "subscription_id": "sub_test",
+        "payment_id": "pay_test",
+        "amount": 1500,
+        "currency": "INR",
+        "status": "paid",
+        "issued_at": 1796913600,
+        "paid_at": 1797000000
+      }
+    }
+  }
+}

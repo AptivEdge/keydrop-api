@@ -1,0 +1,16 @@
+model AuditEvent {
+  id        String         @id @default(cuid())
+  eventType AuditEventType
+  secretId  String?
+  actorId   String?
+  ipRegion  String?
+  device    String?
+  timestamp DateTime       @default(now())
+
+  secret Secret? @relation(fields: [secretId], references: [id], onDelete: SetNull)
+  actor  User?   @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([secretId, timestamp])
+  @@index([actorId, timestamp])
+  @@index([eventType, timestamp])
+}

@@ -1,0 +1,20 @@
+model Invoice {
+  id                String        @id @default(cuid())
+  subscriptionId    String
+  userId            String
+  amount            Int
+  currency          String        @db.VarChar(3)
+  status            InvoiceStatus @default(draft)
+  issuedAt          DateTime      @default(now())
+  paidAt            DateTime?
+  externalId        String?       @unique
+  paymentId         String?       @unique
+  providerUpdatedAt DateTime?
+  createdAt         DateTime      @default(now())
+
+  subscription Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Restrict)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([userId, issuedAt])
+  @@index([subscriptionId, status])
+}

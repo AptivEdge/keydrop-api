@@ -1,0 +1,16 @@
+{
+  "account_id": "acc_test",
+  "created_at": 1797000000,
+  "event": "subscription.activated",
+  "payload": {
+    "subscription": {
+      "entity": {
+        "id": "sub_test",
+        "plan_id": "plan_pro_monthly",
+        "status": "active",
+        "current_start": 1797000000,
+        "current_end": 1799592000
+      }
+    }
+  }
+}
