@@ -1,6 +1,6 @@
 {
   "name": "keydrop-api",
-  "version": "0.0.1",
+  "version": "0.0.2-dev.0",
   "description": "",
   "author": "",
   "private": true,
@@ -20,7 +20,9 @@
     "test:watch": "vitest",
     "test:cov": "vitest run --coverage",
     "test:debug": "vitest --inspect-brk --no-file-parallelism",
-    "test:e2e": "vitest run --config ./vitest.config.e2e.ts"
+    "test:e2e": "vitest run --config ./vitest.config.e2e.ts",
+    "version:dev": "npm version prerelease --preid=dev --tag-version-prefix=dev-v",
+    "version:production": "npm version patch --tag-version-prefix=v"
   },
   "dependencies": {
     "@aws-sdk/client-cognito-identity-provider": "^3.1152.0",
