@@ -5,7 +5,7 @@
   "author": "",
   "private": true,
   "license": "UNLICENSED",
-  "type": "commonjs",
+  "type": "module",
   "scripts": {
     "build": "prisma generate --config prisma7.config.ts && nest build",
     "db:seed": "prisma db seed --config prisma7.config.ts",

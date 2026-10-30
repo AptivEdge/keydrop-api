@@ -1,8 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
-import { PrismaService } from '../../prisma/prisma.service';
+import { PrismaService } from '../../prisma/prisma.service.js';
 import { Prisma } from '../../generated/prisma/client.js';
-import { StoragePurgeService } from '../../storage/storage-purge.service';
+import { StoragePurgeService } from '../../storage/storage-purge.service.js';
 
 @Injectable()
 export class SecretCleanupCronService {

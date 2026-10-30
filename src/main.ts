@@ -8,6 +8,7 @@ import { AppModule } from './app.module.js';
 import { LoggerService } from './logger/services/logger.service.js';
 import path from 'node:path';
 import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 export async function createApplication(): Promise<NestExpressApplication> {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
@@ -187,7 +188,10 @@ function validateRuntimeConfiguration(config: ConfigService): void {
   }
 }
 
-if (require.main === module) {
+if (
+  process.argv[1] &&
+  fileURLToPath(import.meta.url) === path.resolve(process.argv[1])
+) {
   void bootstrap().catch((error: unknown) => {
     const logger = new Logger('Bootstrap');
     logger.error(

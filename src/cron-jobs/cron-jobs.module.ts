@@ -1,11 +1,11 @@
 import { DynamicModule, Module } from '@nestjs/common';
 import { ScheduleModule } from '@nestjs/schedule';
-import { PrismaModule } from '../prisma/prisma.module';
-import { SecretCleanupCronService } from './services/secret-cleanup.cron.service';
-import { EmailOtpCleanupCronService } from './services/email-otp-cleanup.cron.service';
-import { RetentionCleanupCronService } from './services/retention-cleanup.cron.service';
-import { LoggerModule } from '@keydrop/logger/logger.module';
-import { StorageModule } from '../storage/storage.module';
+import { PrismaModule } from '../prisma/prisma.module.js';
+import { SecretCleanupCronService } from './services/secret-cleanup.cron.service.js';
+import { EmailOtpCleanupCronService } from './services/email-otp-cleanup.cron.service.js';
+import { RetentionCleanupCronService } from './services/retention-cleanup.cron.service.js';
+import { LoggerModule } from '../logger/logger.module.js';
+import { StorageModule } from '../storage/storage.module.js';
 import { TeamsModule } from '../teams/teams.module.js';
 import { NotificationsCronService } from './services/notifications.cron.service.js';
 import { BillingModule } from '../billing/billing.module.js';

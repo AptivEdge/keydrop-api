@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { SecretCleanupCronService } from './secret-cleanup.cron.service';
+import { SecretCleanupCronService } from './secret-cleanup.cron.service.js';
 
 describe('SecretCleanupCronService', () => {
   it('purges expired secret content while retaining the secret record', async () => {
