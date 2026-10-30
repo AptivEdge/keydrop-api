@@ -7,7 +7,7 @@
   "license": "UNLICENSED",
   "type": "commonjs",
   "scripts": {
-    "build": "nest build",
+    "build": "prisma generate --config prisma7.config.ts && nest build",
     "db:seed": "prisma db seed --config prisma7.config.ts",
     "deploy": "nest deploy",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
