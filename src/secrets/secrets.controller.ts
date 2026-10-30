@@ -1,21 +1,29 @@
-import { Body, Controller, Get, Param, Post } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Param,
+  Post,
+} from '@nestjs/common';
 import { Public } from '../common/auth/decorators/public.decorator.js';
 import { CurrentUser } from '../common/auth/decorators/current-user.decorator.js';
-import type { AuthenticatedUser } from '../common/auth/guards/cognito-auth.guard.js';
+import type { AuthenticatedUser } from '../common/auth/guards/supabase-auth.guard.js';
 import { CreateSecretDto } from './dto/create-secret.dto.js';
 import { RevealSecretDto } from './dto/reveal-secret.dto.js';
 import { ReportSecretDto } from './dto/report-secret.dto.js';
 import { CreateSecretRequestDto } from './dto/create-secret-request.dto.js';
 import { UpdateSecretRequestDto } from './dto/update-secret-request.dto.js';
 import { CreateFileUploadDto } from './dto/create-file-upload.dto.js';
-import { RequestRecipientAccessDto } from './dto/request-recipient-access.dto.js';
+import { VerifyRecipientCodeDto } from './dto/verify-recipient-code.dto.js';
 import { SecretsService } from './secrets.service.js';
 import { RateLimit } from '../common/rate-limit/rate-limit.decorator.js';
 import { RecipientAccessService } from './recipient-access.service.js';
 import { RequireApiKeyScope } from '../common/auth/api-key-scopes.js';
+import { OptionalAuth } from '../common/auth/decorators/optional-auth.decorator.js';
 import {
   ApiBearerAuth,
-  ApiBody,
   ApiOperation,
   ApiResponse,
   ApiTags,
@@ -30,31 +38,43 @@ export class SecretsController {
   ) {}
 
   @Post()
+  @OptionalAuth()
   @RequireApiKeyScope('secrets:write')
   @RateLimit('secret_create')
-  @ApiBearerAuth('cognito')
-  @ApiOperation({ summary: 'Create an authenticated secret' })
+  @ApiOperation({
+    summary: 'Create a secret on an active Pro or Team subscription',
+    security: [{ supabase: [] }, {}],
+  })
   @ApiResponse({
     status: 201,
-    description: 'Returns the created secret metadata.',
+    description: 'Returns the public id and secret settings.',
     schema: secretMetadataSchema(),
   })
-  create(@CurrentUser() user: AuthenticatedUser, @Body() dto: CreateSecretDto) {
-    return this.secrets.create(user, dto);
+  @ApiResponse({
+    status: 403,
+    description: 'Secret creation requires an active Pro or Team subscription.',
+  })
+  create(
+    @CurrentUser() user: AuthenticatedUser | undefined,
+    @Body() dto: CreateSecretDto,
+  ) {
+    return user
+      ? this.secrets.create(user, dto)
+      : this.secrets.createAnonymous();
   }
 
   @Public()
   @Post('anonymous')
   @RateLimit('anonymous_secret_create')
-  @ApiBody({ schema: anonymousSecretBodySchema() })
-  @ApiOperation({ summary: 'Create an anonymous secret' })
-  @ApiResponse({
-    status: 201,
-    description: 'Returns the created secret metadata.',
-    schema: secretMetadataSchema(),
+  @ApiOperation({
+    summary: 'Disabled: anonymous secret creation is unavailable',
   })
-  createAnonymous(@Body() dto: CreateSecretDto) {
-    return this.secrets.createAnonymous(dto);
+  @ApiResponse({
+    status: 403,
+    description: 'Anonymous secret creation is unavailable.',
+  })
+  createAnonymous() {
+    return this.secrets.createAnonymous();
   }
 
   @Public()
@@ -63,12 +83,19 @@ export class SecretsController {
   @ApiResponse({
     status: 200,
     description:
-      'Returns public metadata and whether a passphrase is required.',
+      'Returns public metadata and required recipient verification steps.',
     schema: {
       ...secretMetadataSchema(),
       properties: {
         ...secretMetadataSchema().properties,
-        requiresPassphrase: { type: 'boolean' },
+        requires_passphrase: { type: 'boolean' },
+        requires_email_verification: { type: 'boolean' },
+        kdf: {
+          type: 'object',
+          additionalProperties: true,
+          description:
+            'Public key-derivation parameters required by the recipient.',
+        },
       },
     },
   })
@@ -77,20 +104,41 @@ export class SecretsController {
   }
 
   @Public()
-  @Post(':id/access/request')
+  @Post(':id/email-code')
   @RateLimit('recipient_access')
-  @ApiOperation({ summary: 'Request recipient access to a secret' })
+  @ApiOperation({ summary: 'Email the recipient verification code' })
   @ApiResponse({
     status: 201,
-    description:
-      'Returns the access request identifier, status, and creation time.',
-    schema: accessRequestSchema(),
+    description: 'A six-digit verification code was sent to the recipient.',
   })
-  requestRecipientAccess(
+  sendRecipientCode(@Param('id') id: string) {
+    return this.recipientAccess.sendCode(id);
+  }
+
+  @Public()
+  @Post(':id/email-verify')
+  @RateLimit('otp_verify')
+  @ApiOperation({
+    summary: 'Verify the recipient code and issue an access token',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Returns a five-minute access token bound to this secret.',
+    schema: {
+      type: 'object',
+      required: ['access_token', 'expires_in'],
+      properties: {
+        access_token: { type: 'string' },
+        expires_in: { type: 'integer', example: 300 },
+      },
+    },
+  })
+  @HttpCode(HttpStatus.OK)
+  verifyRecipientCode(
     @Param('id') id: string,
-    @Body() dto: RequestRecipientAccessDto,
+    @Body() dto: VerifyRecipientCodeDto,
   ) {
-    return this.recipientAccess.requestAccess(id, dto.email);
+    return this.recipientAccess.verifyCode(id, dto.code);
   }
 
   @Public()
@@ -98,20 +146,14 @@ export class SecretsController {
   @RateLimit('secret_reveal')
   @ApiOperation({ summary: 'Reveal a secret' })
   @ApiResponse({
-    status: 201,
+    status: 200,
     description:
       'Returns the encrypted secret material. The client decrypts it.',
     schema: {
-      type: 'object',
-      required: ['ciphertextRef', 'iv', 'wrappedKey', 'salt'],
-      properties: {
-        ciphertextRef: { type: 'string' },
-        iv: { type: 'string' },
-        wrappedKey: { type: 'string' },
-        salt: { type: 'string' },
-      },
+      ...encryptedMaterialSchema(),
     },
   })
+  @HttpCode(HttpStatus.OK)
   reveal(@Param('id') id: string, @Body() dto: RevealSecretDto) {
     return this.secrets.reveal(id, dto);
   }
@@ -144,7 +186,7 @@ export class SecretsController {
 
   @Post(':id/revoke')
   @RequireApiKeyScope('secrets:write')
-  @ApiBearerAuth('cognito')
+  @ApiBearerAuth('supabase')
   @ApiOperation({ summary: 'Revoke an owned secret' })
   @ApiResponse({
     status: 201,
@@ -169,7 +211,7 @@ export class SecretsController {
 
   @Get(':id/requests')
   @RequireApiKeyScope('secrets:read')
-  @ApiBearerAuth('cognito')
+  @ApiBearerAuth('supabase')
   @ApiOperation({ summary: 'List access requests for an owned secret' })
   @ApiResponse({
     status: 200,
@@ -186,7 +228,7 @@ export class SecretsController {
 
   @Post(':id/requests/:requestId')
   @RequireApiKeyScope('secrets:write')
-  @ApiBearerAuth('cognito')
+  @ApiBearerAuth('supabase')
   @ApiOperation({ summary: 'Approve or deny an access request' })
   @ApiResponse({
     status: 201,
@@ -213,7 +255,7 @@ export class SecretsController {
 
   @Post(':id/files')
   @RequireApiKeyScope('secrets:write')
-  @ApiBearerAuth('cognito')
+  @ApiBearerAuth('supabase')
   @ApiOperation({ summary: 'Create a presigned file upload URL' })
   @ApiResponse({
     status: 201,
@@ -251,12 +293,12 @@ export class SecretsController {
 
   @Post(':id/files/:fileId/complete')
   @RequireApiKeyScope('secrets:write')
-  @ApiBearerAuth('cognito')
+  @ApiBearerAuth('supabase')
   @ApiOperation({ summary: 'Verify that a file upload completed' })
   @ApiResponse({
     status: 201,
     description:
-      'Verifies the S3 object size and content type before completion.',
+      'Verifies the stored object size and content type before completion.',
     schema: {
       type: 'object',
       required: ['id', 'uploaded', 'alreadyCompleted'],
@@ -277,7 +319,7 @@ export class SecretsController {
 
   @Get(':id/files/:fileId/download')
   @RequireApiKeyScope('secrets:read')
-  @ApiBearerAuth('cognito')
+  @ApiBearerAuth('supabase')
   @ApiOperation({
     summary: 'Get a presigned download URL for an uploaded file',
   })
@@ -306,28 +348,43 @@ export class SecretsController {
 function secretMetadataSchema() {
   return {
     type: 'object' as const,
-    required: [
-      'id',
-      'label',
-      'status',
-      'maxViews',
-      'viewsUsed',
-      'expiresAt',
-      'createdAt',
-      'updatedAt',
-    ],
+    required: ['id', 'status', 'expires_at', 'max_views'],
     properties: {
       id: { type: 'string' },
       label: { type: 'string', nullable: true },
       status: {
         type: 'string',
-        enum: ['active', 'viewed', 'expired', 'revoked'],
+        enum: [
+          'active',
+          'partially_viewed',
+          'viewed',
+          'expired',
+          'revoked',
+          'locked',
+        ],
       },
-      maxViews: { type: 'integer', nullable: true },
-      viewsUsed: { type: 'integer' },
-      expiresAt: { type: 'string', format: 'date-time', nullable: true },
-      createdAt: { type: 'string', format: 'date-time' },
-      updatedAt: { type: 'string', format: 'date-time' },
+      max_views: { type: 'integer', nullable: true },
+      expires_at: { type: 'string', format: 'date-time', nullable: true },
+    },
+  };
+}
+
+function encryptedMaterialSchema() {
+  return {
+    type: 'object' as const,
+    required: ['ciphertext', 'iv', 'kdf'],
+    properties: {
+      ciphertext: { type: 'string' },
+      iv: { type: 'string' },
+      kdf: {
+        type: 'object',
+        required: ['algorithm'],
+        properties: {
+          algorithm: { type: 'string', enum: ['HKDF-SHA-256', 'Argon2id'] },
+          salt: { type: 'string' },
+          parameters: { type: 'object', additionalProperties: true },
+        },
+      },
     },
   };
 }
@@ -352,28 +409,6 @@ function accessRequestListItemSchema() {
     properties: {
       ...schema.properties,
       updatedAt: { type: 'string', format: 'date-time' },
-    },
-  };
-}
-
-function anonymousSecretBodySchema() {
-  return {
-    type: 'object' as const,
-    required: ['ciphertextRef', 'iv', 'wrappedKey', 'salt', 'expiresAt'],
-    properties: {
-      ciphertextRef: { type: 'string', minLength: 1, maxLength: 65536 },
-      iv: { type: 'string', minLength: 1, maxLength: 512 },
-      wrappedKey: { type: 'string', minLength: 1, maxLength: 8192 },
-      salt: { type: 'string', minLength: 1, maxLength: 512 },
-      authHash: { type: 'string', maxLength: 512 },
-      label: { type: 'string', maxLength: 200 },
-      maxViews: { type: 'integer', minimum: 1, maximum: 3 },
-      expiresAt: {
-        type: 'string',
-        format: 'date-time',
-        description: 'Must expire within 24 hours.',
-      },
-      recipientEmailHash: { type: 'string', maxLength: 512 },
     },
   };
 }

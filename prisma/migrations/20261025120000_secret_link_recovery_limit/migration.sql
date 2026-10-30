@@ -1,0 +1,2 @@
+ALTER TABLE "Secret"
+ADD COLUMN "recoveryCount" INTEGER NOT NULL DEFAULT 0;

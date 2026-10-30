@@ -1,9 +1,12 @@
-import { Body, Controller, Post } from '@nestjs/common';
+import { Body, Controller, Get, Post } from '@nestjs/common';
 import { AuthRoles } from '../common/auth/decorators/auth.decorator.js';
 import { CurrentUser } from '../common/auth/decorators/current-user.decorator.js';
-import type { AuthenticatedUser } from '../common/auth/guards/cognito-auth.guard.js';
+import type { AuthenticatedUser } from '../common/auth/guards/supabase-auth.guard.js';
 import { BillingService } from './billing.service.js';
-import { RefundDto } from './dto/billing.dto.js';
+import {
+  CreateAdminBillingPlanDto,
+  RefundDto,
+} from './dto/billing.dto.js';
 import {
   ApiBearerAuth,
   ApiOperation,
@@ -12,11 +15,26 @@ import {
 } from '@nestjs/swagger';
 
 @ApiTags('Admin')
-@ApiBearerAuth('cognito')
+@ApiBearerAuth('supabase')
 @Controller('admin/billing')
 @AuthRoles('BIL', 'ADM')
 export class BillingAdminController {
   constructor(private readonly billing: BillingService) {}
+
+  @Get('plans')
+  @ApiOperation({ summary: 'List managed Razorpay plans' })
+  listPlans() {
+    return this.billing.listAdminBillingPlans();
+  }
+
+  @Post('plans')
+  @ApiOperation({ summary: 'Create and activate a Razorpay plan' })
+  createPlan(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: CreateAdminBillingPlanDto,
+  ) {
+    return this.billing.createAdminBillingPlan(body, user);
+  }
 
   @Post('refunds')
   @ApiOperation({ summary: 'Refund a Razorpay payment (billing staff)' })

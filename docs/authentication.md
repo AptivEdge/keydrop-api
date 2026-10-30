@@ -46,11 +46,110 @@ Staff membership is stored in
 
 Staff roles are enforced by the API and must not be enforced only in the UI.
 
-## Cognito authentication flow
+### Admin account provisioning
 
-The global
-[`CognitoAuthGuard`](../src/common/auth/guards/cognito-auth.guard.ts)
-protects routes by default.
+An authenticated `ADM` can list staff accounts with `GET /admin/admin-users`
+and create an Admin account with `POST /admin/admin-users` using
+`{"email":"admin@example.com"}`. The endpoint is rate limited and requires an
+authenticated staff session.
+
+The first `ADM` can be created with `POST /admin/bootstrap` and
+`{"email":"admin@example.com","password":"<your chosen password>"}`. Choose a
+unique password of at least 12 characters; there is no shared or hard-coded
+default. It is used as the initial Supabase password and is never returned or
+emailed. This endpoint requires the
+`x-admin-bootstrap-token` header, configured server-side as
+`ADMIN_BOOTSTRAP_TOKEN` with at least 32 bytes. Generate a cryptographically
+random value for this setting. The endpoint is disabled when the setting is
+absent, rate limited to three attempts per hour, and uses a database
+transaction lock to ensure only one first Admin can be created. Remove the
+environment variable immediately after successful bootstrap. Never send the
+bootstrap token from browser code or put it in a URL.
+
+Bootstrap creates a Supabase identity with the chosen initial password,
+creates the linked Keydrop user and `ADM` row, and sends the existing email
+verification code. Verify the email before signing in. Additional Admin
+invitations still use random undisclosed passwords and the password-reset
+flow. Failed email delivery triggers cleanup of the pending OTP, database
+records, and Supabase identity; cleanup failures are logged and returned as
+service-unavailable errors. Never expose the Supabase service-role key
+through this endpoint.
+
+Admin sign-in uses the account password as its only authentication factor.
+
+### GitHub customer sign-in
+
+The customer web app starts Supabase OAuth with the GitHub provider and
+exchanges the PKCE callback code server-side. It then calls
+`POST /auth/oauth/github/session` with the Supabase access token. The API
+validates the token with Supabase, requires a verified GitHub identity, and
+creates or links only a customer profile. Staff profiles are rejected from
+this customer OAuth flow. The web app stores the resulting session in its
+existing HttpOnly cookies.
+
+Configure `SUPABASE_URL` and `SUPABASE_ANON_KEY` in the web deployment, enable
+GitHub in the Supabase Auth providers, and allow the web callback URL
+`https://<customer-web-host>/api/session/github/callback` in Supabase's
+redirect URL settings. No service-role key is used by the web app.
+
+## Authentication provider and target flow
+
+Supabase Auth is the only supported identity provider. The API continues to
+enforce authorization from its PostgreSQL user, team, and staff-role records.
+
+With Supabase Auth:
+
+1. The API creates Supabase identities using the server-only Supabase Admin
+   API. Signup confirmation and password reset use purpose-scoped,
+   short-lived OTPs stored as HMAC hashes in PostgreSQL and sent only through
+   Resend. Supabase Auth does not send application auth emails. Login, refresh,
+   logout, identity confirmation, and password updates use Supabase Auth APIs.
+   If signup fails before the verification email is accepted, the API consumes
+   its pending code and deletes the newly created unverified Supabase identity.
+   If cleanup fails, the API reports this explicitly and logs a safe cleanup
+   failure event.
+2. The API validates Supabase JWT signatures from the project's JWKS endpoint,
+   issuer `${SUPABASE_URL}/auth/v1`, and audience `authenticated`.
+3. The verified JWT `sub` is linked to `User.identitySubject`.
+4. The global API guard loads the linked application profile and its
+   `AdminUser` record. Customer plans, team membership, and staff permissions
+   continue to come from PostgreSQL, never from client-provided or unverified
+   role claims.
+5. The existing response field `idToken` is retained as a compatibility alias
+   for the Supabase access token. New clients should use `accessToken`; do not
+   assume the alias has Cognito ID-token claims.
+
+The API requires `EMAIL_PROVIDER=resend`, `EMAIL_API_KEY`, `EMAIL_FROM`, the
+published `EMAIL_TEMPLATE_AUTH_VERIFICATION` and
+`EMAIL_TEMPLATE_PASSWORD_RESET` aliases, and `SECRET_AUTH_PEPPER` to send
+signup verification and password-reset codes. Configure Resend with a verified
+sender domain. No Supabase Auth email template, SMTP sender, or redirect URL
+is used by these API flows. See
+[Resend email templates](./email-templates.md) for template setup and
+configuration. Supabase Auth password policy,
+session lifetime, refresh-token rotation, and any MFA/OAuth features must be
+checked in the project before cutover.
+The application-owned `EmailOtp` table has RLS enabled and grants no direct
+access to Supabase `anon` or `authenticated` roles; OTPs are accessed only by
+the API's server-side database connection.
+Configure an asymmetric Supabase JWT signing key whose public key is available
+from the project's JWKS endpoint; test a real signed token against the API.
+
+Supabase uses one Auth project for customers and staff; it does not preserve
+Cognito's separate user/staff pools. Provision staff identities through the
+protected Admin account provisioning endpoint described above. Staff
+authorization still comes only from the database record. The Supabase
+service-role key is server-only and must never be sent to a client.
+
+Staff requests require a valid Supabase JWT and an authorized staff role from
+the database. MFA assurance claims are not required by the API.
+
+## Previous Cognito authentication flow (historical)
+
+This section records the retired Cognito behavior only. The Cognito guard and
+dev pools have been deleted; the current implementation uses
+[`SupabaseAuthGuard`](../src/common/auth/guards/supabase-auth.guard.ts).
+No production Cognito pools were found in the AWS account inventory.
 
 For each request, the guard:
 
@@ -58,7 +157,7 @@ For each request, the guard:
 2. Requires the `Bearer <token>` format.
 3. Validates the token against the configured customer or staff Cognito pool.
 4. Reads the verified Cognito `sub`.
-5. Looks up `User.cognitoSubject` in PostgreSQL.
+5. Looked up the legacy identity subject in PostgreSQL.
 6. Loads the linked `AdminUser` record, if one exists.
 7. Attaches the authenticated user to `request.user`.
 8. Applies any route-level staff role requirements.
@@ -95,24 +194,29 @@ be used even if their bearer token remains available.
 ## Email OTP verification
 
 Email verification is tracked in PostgreSQL through the
-[`EmailOtp`](../prisma/models/email-otp.prisma) model. The
-[`EmailOtpService`](../src/common/auth/services/email-otp.service.ts):
+[`EmailOtp`](../prisma/models/email-otp.prisma) model. The [`EmailOtpService`](../src/common/auth/services/email-otp.service.ts):
 
 - Normalizes email addresses before lookup.
 - Generates a six-digit code using a cryptographically secure random source.
-- Stores only a SHA-256 hash of the code.
+- Stores only an HMAC-SHA-256 hash of the code, keyed by
+  `SECRET_AUTH_PEPPER`.
+- Separates recipient-access, signup verification, and password-reset codes by
+  purpose so a code cannot be replayed across workflows.
 - Expires codes after 10 minutes.
 - Allows at most five failed attempts.
 - Allows one unconsumed code request per email every 60 seconds.
 - Marks a successful code as consumed so it cannot be reused.
-- Sets `User.emailVerifiedAt` when the OTP is linked to a user.
+- Persists the related Supabase identity subject with auth-purpose codes; after
+  a valid signup code, the API confirms that identity and synchronizes its
+  application profile.
 
-The hourly
+The auth service sends generated codes through the shared Resend
+[`EmailService`](../src/email/email.service.ts); codes are never returned by
+public endpoints or logged. The hourly
 [`EmailOtpCleanupCronService`](../src/cron-jobs/services/email-otp-cleanup.cron.service.ts)
 deletes expired and older-than-24-hour OTP records. Email delivery is kept
-outside the persistence service: an approved email provider should receive the
-code returned by `EmailOtpService.issue()` and send it to the user. Never
-return that code directly from a public HTTP endpoint or log it.
+outside the persistence service and uses the shared Resend email service.
+Never return a code directly from a public HTTP endpoint or log it.
 
 ## User CRUD and authorization
 
@@ -135,21 +239,20 @@ controller. `@SelfOrStaff()` with `SelfOrStaffGuard` prevents a customer from
 reading another user's profile. Staff authorization is still enforced by the
 global `@AuthRoles()` mechanism and the database-backed `AdminUser.role`.
 
-The create endpoint requires an email and Cognito `sub`. It creates a
-non-password login record because Cognito is the only supported authentication
-provider. The generated `passwordHash` is intentionally unusable and must not
-be used for password authentication.
+The create endpoint requires an email and an identity subject. It creates a
+non-password login record; Supabase Auth owns password authentication. The
+generated `passwordHash` is intentionally unusable and must not be used for
+password authentication.
 
 ### Environment variables
 
-Configure the Cognito pools in `.env`:
+Configure Supabase Auth in `.env`:
 
 ```env
-USER_COGNITO_USER_POOL_ID=
-USER_COGNITO_CLIENT_ID=
-ADMIN_COGNITO_USER_POOL_ID=
-ADMIN_COGNITO_CLIENT_ID=
-COGNITO_REGION=ap-south-1
+AUTH_PROVIDER=supabase
+SUPABASE_URL=
+SUPABASE_ANON_KEY=
+SUPABASE_SERVICE_ROLE_KEY=
 ```
 
 The full environment template is available at
@@ -157,14 +260,13 @@ The full environment template is available at
 
 ### Client request
 
-Clients must send a valid Cognito token:
+Clients must send a valid Supabase Auth JWT:
 
 ```http
 Authorization: Bearer <cognito-id-token>
 ```
 
-Logout endpoints use an access token. Other protected endpoints use an ID
-token.
+Protected endpoints and logout use Supabase Auth access tokens.
 
 ## Public routes
 
@@ -298,17 +400,17 @@ request.user.userType === 'ADMIN';
 request.user.role === 'TS' || 'ADM' || 'AUD';
 ```
 
-## Cognito-to-database mapping
+## Legacy identity-to-database mapping
 
-Every authenticated Cognito user must have its Cognito `sub` stored in
-`User.cognitoSubject`:
+The previous Cognito implementation mapped its token `sub` to the identity
+subject stored on the application user:
 
 ```text
-Cognito token sub -> User.cognitoSubject
+Legacy Cognito token sub -> User identity subject
 ```
 
-If no matching user exists, the request is rejected even when the Cognito token
-is valid.
+The current Supabase Auth implementation uses `User.identitySubject`. The
+request is rejected when no matching application profile exists.
 
 For staff users, create the linked `AdminUser` record:
 
@@ -316,7 +418,7 @@ For staff users, create the linked `AdminUser` record:
 await prisma.user.update({
   where: { email: 'staff@example.com' },
   data: {
-    cognitoSubject: '<cognito-sub>',
+    identitySubject: '<supabase-auth-uuid>',
   },
 });
 
@@ -324,13 +426,44 @@ await prisma.adminUser.create({
   data: {
     userId: '<keydrop-user-id>',
     role: 'TS',
-    ssoSubject: '<cognito-sub>',
+    ssoSubject: '<supabase-auth-uuid>',
   },
 });
 ```
 
-The `AdminUser.ssoSubject` should match the Cognito subject for the linked
+The `AdminUser.ssoSubject` should match the identity subject for the linked
 user.
+
+## Existing-identity recovery
+
+The dev Cognito pools and users were permanently deleted during AWS retirement.
+No production pools were found in the inventory. No password hashes or user
+records were migrated by this repository. Legacy `User.passwordHash` values
+are placeholders and must never be imported as Supabase credentials.
+
+Before changing `AUTH_PROVIDER` for existing users:
+
+1. If an independent authorized export exists, securely map each legacy subject and normalized email to
+   its existing `User.id`, email-verification status, and (for staff) linked
+   `AdminUser` record/role. Do not include passwords, tokens, or secret data.
+2. Resolve duplicate emails, deleted users, unverified addresses, and any
+   missing staff profile manually before identity creation. Do not auto-link
+   solely on an unverified email.
+3. Create corresponding Supabase Auth users through a controlled
+   administrative migration using unique, high-entropy temporary passwords
+   that are never stored or disclosed. Preserve verification state only when
+   supported by a trusted verification record. Require a Supabase
+   recovery/password-reset flow before users can resume password login.
+4. Link each new Supabase Auth UUID to the existing `User.id` using
+   `User.identitySubject`, and update
+   `AdminUser.ssoSubject` for staff. Preserve plans, teams, audit records,
+   billing data, and roles. Verify uniqueness and counts before cutover.
+5. Send recovery instructions through the configured provider, support
+   password reset, and test customer and staff authorization before routing
+   traffic. Do not assume Cognito is available as a rollback option.
+
+The repository does not include a bulk legacy identity importer. Any
+independent migration must be rehearsed and audited before production use.
 
 ## Previous project role mapping
 
@@ -344,7 +477,7 @@ should not be copied as global roles into Keydrop:
 | `ADMIN`       | `TeamMember.role = admin`, or staff `AdminUser.role = ADM` depending on context |
 | `SUPER_ADMIN` | Staff `AdminUser.role = ADM`                                                    |
 
-In Keydrop, Cognito authenticates the identity while PostgreSQL determines the
+In Keydrop, Supabase Auth authenticates the identity while PostgreSQL determines the
 current customer plan, team role, and staff role.
 
 ## Security rules

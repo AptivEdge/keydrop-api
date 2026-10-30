@@ -8,7 +8,7 @@ import {
   Query,
 } from '@nestjs/common';
 import { CurrentUser } from '../common/auth/decorators/current-user.decorator.js';
-import type { AuthenticatedUser } from '../common/auth/guards/cognito-auth.guard.js';
+import type { AuthenticatedUser } from '../common/auth/guards/supabase-auth.guard.js';
 import { CursorPaginationDto } from '../common/dto/cursor-pagination.dto.js';
 import { RequireApiKeyScope } from '../common/auth/api-key-scopes.js';
 import { BillingService } from './billing.service.js';
@@ -26,7 +26,7 @@ import {
 } from '@nestjs/swagger';
 
 @ApiTags('Billing')
-@ApiBearerAuth('cognito')
+@ApiBearerAuth('supabase')
 @Controller('me/billing')
 export class BillingController {
   constructor(private readonly billing: BillingService) {}
@@ -102,13 +102,25 @@ export class BillingController {
   @ApiResponse({
     status: 200,
     description:
-      'Returns the canceled subscription identifier, status, and update time.',
+      'Schedules cancellation at the end of the current paid period. The subscription stays active until then.',
     schema: {
       type: 'object',
-      required: ['id', 'status', 'updatedAt'],
+      required: [
+        'id',
+        'status',
+        'cancelAtPeriodEnd',
+        'currentPeriodEnd',
+        'updatedAt',
+      ],
       properties: {
         id: { type: 'string' },
-        status: { type: 'string', enum: ['canceled'] },
+        status: { type: 'string' },
+        cancelAtPeriodEnd: { type: 'boolean', enum: [true] },
+        currentPeriodEnd: {
+          type: 'string',
+          format: 'date-time',
+          nullable: true,
+        },
         updatedAt: { type: 'string', format: 'date-time' },
       },
     },
@@ -170,22 +182,30 @@ export class BillingController {
     },
   })
   checkout(@CurrentUser() user: AuthenticatedUser, @Body() body: CheckoutDto) {
-    return this.billing.createCheckout(user.userId, body.plan, body.interval);
+    return this.billing.createCheckout(
+      user.userId,
+      body.plan,
+      body.interval,
+      body.expectedAmount,
+    );
   }
 
   @Post('verify')
   @RequireApiKeyScope('billing:write')
+  @RateLimit('checkout')
   @ApiOperation({ summary: 'Verify Razorpay checkout signature' })
   @ApiResponse({
     status: 201,
     description:
-      'Returns whether the payment signature was verified and whether webhook confirmation is still required.',
+      'Verifies the checkout signature and synchronizes the subscription from Razorpay when its state is available.',
     schema: {
       type: 'object',
-      required: ['verified', 'webhookRequired'],
+      required: ['verified', 'activated', 'webhookRequired', 'plan'],
       properties: {
         verified: { type: 'boolean', enum: [true] },
-        webhookRequired: { type: 'boolean', enum: [true] },
+        activated: { type: 'boolean' },
+        webhookRequired: { type: 'boolean' },
+        plan: { type: 'string', enum: ['free', 'pro', 'team'] },
       },
     },
   })
@@ -201,6 +221,21 @@ export class BillingController {
       body.signature,
     );
   }
+
+  @Post('refresh')
+  @RequireApiKeyScope('billing:write')
+  @RateLimit('checkout')
+  @ApiOperation({
+    summary: 'Refresh the current user subscription state from Razorpay',
+  })
+  @ApiResponse({
+    status: 200,
+    description:
+      'Returns the current plan and most recently created subscription after provider synchronization.',
+  })
+  refresh(@CurrentUser() user: AuthenticatedUser) {
+    return this.billing.refreshBillingStatus(user.userId);
+  }
 }
 
 function subscriptionSchema() {
@@ -213,6 +248,7 @@ function subscriptionSchema() {
       'billingInterval',
       'pendingTier',
       'pendingInterval',
+      'cancelAtPeriodEnd',
       'status',
       'currentPeriodStart',
       'currentPeriodEnd',
@@ -239,6 +275,7 @@ function subscriptionSchema() {
         enum: ['monthly', 'yearly'],
         nullable: true,
       },
+      cancelAtPeriodEnd: { type: 'boolean' },
       status: { type: 'string' },
       currentPeriodStart: {
         type: 'string',

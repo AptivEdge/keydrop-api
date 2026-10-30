@@ -1,17 +1,24 @@
 model EmailOtp {
-  id          String    @id @default(cuid())
-  userId      String?
-  email       String
-  codeHash    String
-  expiresAt   DateTime
-  attempts    Int       @default(0)
-  maxAttempts Int       @default(5)
-  consumedAt  DateTime?
-  createdAt   DateTime  @default(now())
+  id              String          @id @default(cuid())
+  userId          String?
+  secretId        String?
+  identitySubject String?
+  email           String
+  purpose         EmailOtpPurpose @default(recipient_access)
+  codeHash        String
+  expiresAt       DateTime
+  attempts        Int             @default(0)
+  maxAttempts     Int             @default(5)
+  consumedAt      DateTime?
+  createdAt       DateTime        @default(now())
 
-  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user   User?   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  secret Secret? @relation(fields: [secretId], references: [id], onDelete: Cascade)
 
   @@index([email, createdAt])
+  @@index([email, purpose, createdAt])
   @@index([email, expiresAt])
+  @@index([purpose, codeHash])
   @@index([expiresAt])
+  @@index([secretId, createdAt])
 }

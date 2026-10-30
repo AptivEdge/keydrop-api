@@ -1,7 +1,10 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   GoneException,
+  HttpException,
+  HttpStatus,
   Injectable,
   NotFoundException,
   ServiceUnavailableException,
@@ -12,12 +15,18 @@ import {
   GetObjectCommand,
   HeadObjectCommand,
   PutObjectCommand,
-  S3Client,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import {
+  createHash,
+  createHmac,
+  randomBytes,
+  randomInt,
+  timingSafeEqual,
+} from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service.js';
-import type { AuthenticatedUser } from '../common/auth/guards/cognito-auth.guard.js';
+import { Prisma } from '../generated/prisma/client.js';
+import type { AuthenticatedUser } from '../common/auth/guards/supabase-auth.guard.js';
 import type { CreateSecretDto } from './dto/create-secret.dto.js';
 import type { RevealSecretDto } from './dto/reveal-secret.dto.js';
 import type { ReportSecretDto } from './dto/report-secret.dto.js';
@@ -27,6 +36,10 @@ import type { CreateFileUploadDto } from './dto/create-file-upload.dto.js';
 import { RecipientAccessService } from './recipient-access.service.js';
 import { StoragePurgeService } from '../storage/storage-purge.service.js';
 import { normalizeNotificationPreferences } from '../common/notifications/notification-preferences.js';
+import {
+  createObjectStorageClient,
+  getObjectStorageOptions,
+} from '../providers/object-storage-options.js';
 
 const metaSelect = {
   id: true,
@@ -49,10 +62,15 @@ export class SecretsService {
   ) {}
 
   async create(owner: AuthenticatedUser, dto: CreateSecretDto) {
-    const data = validateCreate(dto, owner.plan);
+    if (owner.plan !== 'pro' && owner.plan !== 'team') {
+      throw new ForbiddenException(
+        'Creating secrets requires an active Pro or Team subscription',
+      );
+    }
+    const data = validateCreate(dto, owner.plan, this.config);
     const result = await this.prisma.$transaction(async (tx) => {
       const secret = await tx.secret.create({
-        data: { ...data, ownerId: owner.userId },
+        data: { ...data, id: generatePublicId(), ownerId: owner.userId },
         select: metaSelect,
       });
       await tx.auditEvent.create({
@@ -64,135 +82,229 @@ export class SecretsService {
       });
       return secret;
     });
-    return result;
+    return createResponse(result);
   }
 
-  async createAnonymous(dto: CreateSecretDto) {
-    const data = validateAnonymousCreate(dto);
-    return this.prisma.secret.create({
-      data: { ...data, ownerId: null },
-      select: metaSelect,
-    });
+  async createAnonymous(): Promise<never> {
+    throw new ForbiddenException(
+      'Creating secrets requires an authenticated Pro or Team subscription',
+    );
   }
 
   async getMeta(id: string) {
+    validateSecretId(id);
     const secret = await this.prisma.secret.findUnique({
       where: { id },
-      select: { ...metaSelect, authHash: true },
+      select: {
+        ...metaSelect,
+        authHash: true,
+        recipientEmailHash: true,
+        kdf: true,
+      },
     });
     if (!secret) {
-      throw new NotFoundException('Secret not found');
+      throw new GoneException('Secret is unavailable');
     }
     if (secret.expiresAt && secret.expiresAt <= new Date()) {
+      await this.expireSecret(id);
       throw new GoneException('Secret is unavailable');
     }
     if (
-      secret.status !== 'active' ||
+      !['active', 'partially_viewed'].includes(secret.status) ||
       secret.viewsUsed >= (secret.maxViews ?? 1)
     ) {
       throw new GoneException('Secret is unavailable');
     }
     return {
-      ...withoutAuthHash(secret),
-      requiresPassphrase: Boolean(secret.authHash),
+      id: secret.id,
+      label: secret.label,
+      status: secret.status,
+      max_views: secret.maxViews,
+      views_used: secret.viewsUsed,
+      expires_at: secret.expiresAt,
+      created_at: secret.createdAt,
+      updated_at: secret.updatedAt,
+      requires_passphrase: Boolean(secret.authHash),
+      requires_email_verification: Boolean(secret.recipientEmailHash),
+      kdf: secret.kdf,
     };
   }
 
   async reveal(id: string, dto: RevealSecretDto) {
-    const candidate = await this.prisma.secret.findUnique({
-      where: { id },
-      select: {
-        authHash: true,
-        expiresAt: true,
-        status: true,
-        maxViews: true,
-        viewsUsed: true,
-        recipientEmailHash: true,
-      },
-    });
-    if (!candidate || candidate.status !== 'active') {
-      throw new GoneException('Secret is unavailable');
-    }
-    if (candidate.expiresAt && candidate.expiresAt <= new Date()) {
-      throw new GoneException('Secret is unavailable');
-    }
-    if (candidate.recipientEmailHash) {
-      if (!dto.accessToken) {
-        throw new UnauthorizedException('Recipient access token is required');
-      }
-      await this.recipientAccess.verify(id, dto.accessToken);
-    }
-    if (candidate.authHash && !dto.auth) {
-      throw new UnauthorizedException('Passphrase is required');
-    }
-    if (candidate.authHash && !safeHashCompare(candidate.authHash, dto.auth!)) {
-      throw new UnauthorizedException('Passphrase is invalid');
-    }
-
-    const result = await this.prisma.$transaction(async (tx) => {
-      const updated = await tx.secret.updateMany({
-        where: {
-          id,
-          status: 'active',
-          ...(candidate.expiresAt ? { expiresAt: { gt: new Date() } } : {}),
-          ...(candidate.maxViews !== null
-            ? { viewsUsed: { lt: candidate.maxViews ?? 1 } }
-            : {}),
-        },
-        data: {
-          viewsUsed: { increment: 1 },
-          status:
-            candidate.maxViews !== null &&
-            candidate.viewsUsed + 1 >= (candidate.maxViews ?? 1)
-              ? 'viewed'
-              : 'active',
-        },
-      });
-      if (updated.count !== 1) {
-        throw new GoneException('Secret is unavailable');
-      }
-
-      const material = await tx.secret.findUnique({
+    validateSecretId(id);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const candidate = await this.prisma.secret.findUnique({
         where: { id },
         select: {
+          authHash: true,
+          ciphertext: true,
           ciphertextRef: true,
-          iv: true,
-          wrappedKey: true,
-          salt: true,
-          files: { select: { storageRef: true } },
+          expiresAt: true,
+          status: true,
+          maxViews: true,
+          viewsUsed: true,
+          passphraseAttempts: true,
+          recipientEmailHash: true,
         },
       });
-      if (!material) {
+      if (
+        !candidate ||
+        !['active', 'partially_viewed'].includes(candidate.status)
+      ) {
         throw new GoneException('Secret is unavailable');
       }
-      await tx.auditEvent.create({
-        data: { eventType: 'secret_viewed', secretId: id },
+      if (candidate.expiresAt && candidate.expiresAt <= new Date()) {
+        await this.expireSecret(id);
+        throw new GoneException('Secret is unavailable');
+      }
+      if (candidate.recipientEmailHash) {
+        if (!dto.access_token) {
+          throw new UnauthorizedException('Recipient access token is required');
+        }
+        await this.recipientAccess.verify(id, dto.access_token);
+      }
+      if (candidate.authHash) {
+        if (!dto.auth) {
+          throw new UnauthorizedException({
+            code: 'passphrase_required',
+            message: 'Passphrase is required',
+          });
+        }
+        if (
+          !this.verifyAuth(
+            candidate.authHash,
+            dto.auth,
+            candidate.ciphertext,
+            candidate.ciphertextRef,
+          )
+        ) {
+          const failed = await this.recordPassphraseFailure(id);
+          if (failed.locked) {
+            throw new HttpException(
+              { code: 'secret_locked', message: 'Secret is locked' },
+              HttpStatus.LOCKED,
+            );
+          }
+          if (!failed.updated) {
+            throw new GoneException('Secret is unavailable');
+          }
+          throw new UnauthorizedException({
+            code: 'passphrase_invalid',
+            message: 'Passphrase is invalid',
+            attempts_left: failed.attemptsLeft,
+          });
+        }
+      }
+
+      const result = await this.prisma.$transaction(async (tx) => {
+        const material = await tx.secret.findUnique({
+          where: { id },
+          select: {
+            ciphertext: true,
+            ciphertextRef: true,
+            iv: true,
+            kdf: true,
+            wrappedKey: true,
+            salt: true,
+            files: { select: { storageRef: true } },
+          },
+        });
+        if (
+          !material ||
+          (material.ciphertext === null && !material.ciphertextRef)
+        ) {
+          return null;
+        }
+
+        const nextViews = candidate.viewsUsed + 1;
+        const terminal = nextViews >= (candidate.maxViews ?? 1);
+        const updated = await tx.secret.updateMany({
+          where: {
+            id,
+            status: candidate.status,
+            viewsUsed: candidate.viewsUsed,
+            OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+          },
+          data: {
+            viewsUsed: nextViews,
+            status: terminal ? 'viewed' : 'partially_viewed',
+            ...(terminal
+              ? {
+                  ciphertext: null,
+                  ciphertextRef: null,
+                  authHash: null,
+                  kdf: Prisma.DbNull,
+                  wrappedKey: null,
+                  salt: null,
+                }
+              : {}),
+          },
+        });
+        if (updated.count !== 1) return null;
+
+        await tx.auditEvent.create({
+          data: { eventType: 'secret_viewed', secretId: id },
+        });
+        return {
+          material,
+          terminal,
+          storageRefs: [
+            material.ciphertextRef,
+            ...material.files.map((file) => file.storageRef),
+          ].filter((ref): ref is string => Boolean(ref)),
+        };
       });
+      if (!result) continue;
+      if (result.terminal) {
+        await this.storagePurge.purgeSecret(id, result.storageRefs);
+      }
+      if (result.material.ciphertext !== null) {
+        return {
+          ciphertext: result.material.ciphertext,
+          iv: result.material.iv,
+          kdf: result.material.kdf,
+        };
+      }
       return {
-        material: {
-          ciphertextRef: material.ciphertextRef,
-          iv: material.iv,
-          wrappedKey: material.wrappedKey,
-          salt: material.salt,
-        },
-        terminal:
-          candidate.maxViews !== null &&
-          candidate.viewsUsed + 1 >= (candidate.maxViews ?? 1),
-        storageRefs: [
-          material.ciphertextRef,
-          ...material.files.map((file) => file.storageRef),
-        ],
+        ciphertextRef: result.material.ciphertextRef,
+        iv: result.material.iv,
+        wrappedKey: result.material.wrappedKey,
+        salt: result.material.salt,
       };
-    });
-    if (result.terminal) {
-      await this.storagePurge.purgeSecret(id, result.storageRefs);
     }
-    return result.material;
+    throw new GoneException('Secret is unavailable');
   }
 
   async revoke(id: string, owner: AuthenticatedUser): Promise<void> {
+    await this.revokeSecret(id, owner.userId, owner.userId);
+  }
+
+  async revokeByStaff(
+    id: string,
+    actorId: string,
+    reason: string,
+  ): Promise<void> {
+    const normalizedReason = reason.trim();
+    if (normalizedReason.length < 10 || normalizedReason.length > 1000) {
+      throw new ConflictException(
+        'Reason must be between 10 and 1000 characters',
+      );
+    }
+    await this.revokeSecret(id, actorId, undefined, normalizedReason);
+  }
+
+  private async revokeSecret(
+    id: string,
+    actorId: string,
+    ownerId?: string,
+    staffReason?: string,
+  ): Promise<void> {
     const storage = await this.prisma.secret.findFirst({
-      where: { id, ownerId: owner.userId, status: 'active' },
+      where: {
+        id,
+        ...(ownerId ? { ownerId } : {}),
+        status: { in: ['active', 'partially_viewed'] },
+      },
       select: {
         ciphertextRef: true,
         files: { select: { storageRef: true } },
@@ -200,8 +312,20 @@ export class SecretsService {
     });
     const result = await this.prisma.$transaction(async (tx) => {
       const updated = await tx.secret.updateMany({
-        where: { id, ownerId: owner.userId, status: 'active' },
-        data: { status: 'revoked' },
+        where: {
+          id,
+          ...(ownerId ? { ownerId } : {}),
+          status: { in: ['active', 'partially_viewed'] },
+        },
+        data: {
+          status: 'revoked',
+          ciphertext: null,
+          ciphertextRef: null,
+          authHash: null,
+          kdf: Prisma.DbNull,
+          wrappedKey: null,
+          salt: null,
+        },
       });
       if (updated.count !== 1) {
         throw new ConflictException('Secret cannot be revoked');
@@ -210,19 +334,185 @@ export class SecretsService {
         data: {
           eventType: 'secret_revoked',
           secretId: id,
-          actorId: owner.userId,
+          actorId,
         },
       });
+      if (staffReason) {
+        await tx.adminAuditLog.create({
+          data: {
+            actorId,
+            action: 'secret_revoked_by_staff',
+            targetType: 'secret',
+            targetId: id,
+            reason: staffReason,
+          },
+        });
+      }
       return updated;
     });
     if (result.count !== 1) {
       throw new NotFoundException('Secret not found');
     }
     if (storage) {
-      await this.storagePurge.purgeSecret(id, [
-        storage.ciphertextRef,
-        ...storage.files.map((file) => file.storageRef),
-      ]);
+      await this.storagePurge.purgeSecret(
+        id,
+        [
+          storage.ciphertextRef,
+          ...storage.files.map((file) => file.storageRef),
+        ].filter((ref): ref is string => Boolean(ref)),
+      );
+    }
+  }
+
+  private verifyAuth(
+    expectedHash: string,
+    auth: string,
+    ciphertext: string | null,
+    ciphertextRef: string | null,
+  ): boolean {
+    if (ciphertext === null && ciphertextRef !== null) {
+      return safeHashCompare(expectedHash, auth);
+    }
+    const pepper = this.config.get<string>('SECRET_AUTH_PEPPER');
+    if (!pepper || Buffer.byteLength(pepper, 'utf8') < 32) {
+      throw new ServiceUnavailableException(
+        'SECRET_AUTH_PEPPER must contain at least 32 bytes',
+      );
+    }
+    if (!isCanonicalBase64Url(auth)) return false;
+    const authBytes = Buffer.from(auth, 'base64url');
+    if (authBytes.length !== 32) return false;
+    const candidate = createHmac('sha256', pepper)
+      .update(authBytes)
+      .digest('hex');
+    return safeCompare(expectedHash, candidate);
+  }
+
+  private async recordPassphraseFailure(
+    id: string,
+  ): Promise<{ updated: boolean; locked: boolean; attemptsLeft: number }> {
+    const result = await this.prisma.$transaction(async (tx) => {
+      const result = await tx.secret.updateMany({
+        where: {
+          id,
+          status: { in: ['active', 'partially_viewed'] },
+          passphraseAttempts: { lt: 3 },
+        },
+        data: { passphraseAttempts: { increment: 1 } },
+      });
+      if (result.count !== 1) {
+        return {
+          updated: false,
+          locked: false,
+          attemptsLeft: 0,
+          storageRefs: [],
+        };
+      }
+
+      const secret = await tx.secret.findUnique({
+        where: { id },
+        select: { passphraseAttempts: true, status: true },
+      });
+      if (!secret) {
+        return {
+          updated: false,
+          locked: false,
+          attemptsLeft: 0,
+          storageRefs: [],
+        };
+      }
+      const locked = secret.passphraseAttempts >= 3;
+      let storageRefs: string[] = [];
+      if (locked) {
+        const material = await tx.secret.findUnique({
+          where: { id },
+          select: {
+            ciphertextRef: true,
+            files: { select: { storageRef: true } },
+          },
+        });
+        storageRefs = [
+          material?.ciphertextRef,
+          ...(material?.files.map((file) => file.storageRef) ?? []),
+        ].filter((ref): ref is string => Boolean(ref));
+        await tx.secret.updateMany({
+          where: {
+            id,
+            status: { in: ['active', 'partially_viewed'] },
+            passphraseAttempts: { gte: 3 },
+          },
+          data: {
+            status: 'locked',
+            ciphertext: null,
+            ciphertextRef: null,
+            authHash: null,
+            kdf: Prisma.DbNull,
+            wrappedKey: null,
+            salt: null,
+          },
+        });
+        await tx.auditEvent.create({
+          data: { eventType: 'locked', secretId: id },
+        });
+      } else {
+        await tx.auditEvent.create({
+          data: { eventType: 'passphrase_failed', secretId: id },
+        });
+      }
+      return {
+        updated: true,
+        locked,
+        attemptsLeft: Math.max(0, 3 - secret.passphraseAttempts),
+        storageRefs,
+      };
+    });
+    if (result.locked && result.storageRefs.length) {
+      await this.storagePurge.purgeSecret(id, result.storageRefs);
+    }
+    return {
+      updated: result.updated,
+      locked: result.locked,
+      attemptsLeft: result.attemptsLeft,
+    };
+  }
+
+  private async expireSecret(id: string): Promise<void> {
+    const storage = await this.prisma.secret.findUnique({
+      where: { id },
+      select: { ciphertextRef: true, files: { select: { storageRef: true } } },
+    });
+    const expired = await this.prisma.$transaction(async (tx) => {
+      const result = await tx.secret.updateMany({
+        where: {
+          id,
+          status: { in: ['active', 'partially_viewed'] },
+          expiresAt: { lte: new Date() },
+        },
+        data: {
+          status: 'expired',
+          ciphertext: null,
+          ciphertextRef: null,
+          authHash: null,
+          kdf: Prisma.DbNull,
+          wrappedKey: null,
+          salt: null,
+        },
+      });
+      if (result.count) {
+        await tx.auditEvent.create({
+          data: { eventType: 'secret_expired', secretId: id },
+        });
+      }
+      return result;
+    });
+    if (expired.count && storage) {
+      await this.storagePurge.purgeSecret(
+        id,
+        [
+          storage.ciphertextRef,
+          ...storage.files.map((file) => file.storageRef),
+        ].filter((ref): ref is string => Boolean(ref)),
+      );
     }
   }
 
@@ -377,9 +667,14 @@ export class SecretsService {
         status: 'active',
         OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
       },
-      select: { id: true },
+      select: { id: true, owner: { select: { plan: true } } },
     });
     if (!secret) throw new NotFoundException('Secret not found');
+    if (!['pro', 'team'].includes(secret.owner?.plan ?? '')) {
+      throw new ForbiddenException(
+        'File uploads require an active Pro or Team subscription',
+      );
+    }
     const filename = dto.filename?.trim();
     const contentType = dto.contentType?.trim() || 'application/octet-stream';
     if (!filename || filename.length > 255) {
@@ -396,17 +691,16 @@ export class SecretsService {
         'sizeBytes must be between 1 byte and 256 MB',
       );
     }
-    const region = this.config.get<string>('S3_REGION');
-    const bucket = this.config.get<string>('S3_BUCKET');
-    if (!region || !bucket) {
-      throw new ServiceUnavailableException('S3 storage is not configured');
+    const storage = getObjectStorageOptions(this.config);
+    if (!storage) {
+      throw new ServiceUnavailableException('Object storage is not configured');
     }
     const storageRef = `secrets/${secretId}/files/${randomStorageId()}-${safeFilename(filename)}`;
-    const client = new S3Client({ region });
+    const client = createObjectStorageClient(storage);
     const uploadUrl = await getSignedUrl(
       client,
       new PutObjectCommand({
-        Bucket: bucket,
+        Bucket: storage.bucket,
         Key: storageRef,
         ContentType: contentType,
       }),
@@ -448,18 +742,24 @@ export class SecretsService {
         sizeBytes: true,
         contentType: true,
         uploadedAt: true,
+        secret: { select: { owner: { select: { plan: true } } } },
       },
     });
     if (!file) throw new NotFoundException('File not found');
+    if (!['pro', 'team'].includes(file.secret.owner?.plan ?? '')) {
+      throw new ForbiddenException(
+        'File uploads require an active Pro or Team subscription',
+      );
+    }
 
-    const { client, bucket } = this.getS3Storage();
+    const { client, bucket } = this.getObjectStorage();
     let object;
     try {
       object = await client.send(
         new HeadObjectCommand({ Bucket: bucket, Key: file.storageRef }),
       );
     } catch (error) {
-      if (isMissingS3Object(error)) {
+      if (isMissingStoredObject(error)) {
         throw new ConflictException('File upload has not completed');
       }
       throw error;
@@ -533,7 +833,7 @@ export class SecretsService {
       },
     });
     if (!file) throw new NotFoundException('Uploaded file not found');
-    const { client, bucket } = this.getS3Storage();
+    const { client, bucket } = this.getObjectStorage();
     const downloadUrl = await getSignedUrl(
       client,
       new GetObjectCommand({
@@ -547,81 +847,187 @@ export class SecretsService {
     return { id: file.id, downloadUrl, expiresIn: 900 };
   }
 
-  private getS3Storage() {
-    const region = this.config.get<string>('S3_REGION');
-    const bucket = this.config.get<string>('S3_BUCKET');
-    if (!region || !bucket) {
-      throw new ServiceUnavailableException('S3 storage is not configured');
+  private getObjectStorage() {
+    const storage = getObjectStorageOptions(this.config);
+    if (!storage) {
+      throw new ServiceUnavailableException('Object storage is not configured');
     }
-    return { client: new S3Client({ region }), bucket };
+    return {
+      client: createObjectStorageClient(storage),
+      bucket: storage.bucket,
+    };
   }
 }
 
-function validateCreate(dto: CreateSecretDto, plan: string) {
-  const textFields = ['ciphertextRef', 'iv', 'wrappedKey', 'salt'] as const;
-  for (const field of textFields) {
-    if (!dto[field]?.trim()) {
-      throw new BadRequestException(`${field} is required`);
-    }
+function validateCreate(
+  dto: CreateSecretDto,
+  plan: string,
+  config: ConfigService,
+) {
+  const ciphertext = dto.ciphertext?.trim();
+  const iv = dto.iv?.trim();
+  if (!ciphertext) throw new BadRequestException('ciphertext is required');
+  if (!iv) throw new BadRequestException('iv is required');
+  if (!dto.kdf || typeof dto.kdf !== 'object') {
+    throw new BadRequestException('kdf parameters are required');
   }
-  const maxAllowedViews = plan === 'free' ? 10 : 100;
+
+  const encryptedBytes = decodeBase64Url(ciphertext, 'ciphertext');
+  const ivBytes = decodeBase64Url(iv, 'iv');
+  if (ivBytes.length !== 12) {
+    throw new BadRequestException('iv must encode exactly 12 random bytes');
+  }
+
+  const maxPaddedBytes = 256 * 1024 + 4;
+  if (encryptedBytes.length > maxPaddedBytes + 16) {
+    throw new BadRequestException(
+      `Ciphertext exceeds the ${plan} plan size limit`,
+    );
+  }
+
+  validateKdf(dto.kdf, dto.auth);
+  const maxAllowedViews = 100;
+  const maxViews = dto.max_views ?? 1;
   if (
-    dto.maxViews !== undefined &&
-    (!Number.isInteger(dto.maxViews) ||
-      dto.maxViews < 1 ||
-      dto.maxViews > maxAllowedViews)
+    !Number.isInteger(maxViews) ||
+    maxViews < 1 ||
+    maxViews > maxAllowedViews
   ) {
     throw new BadRequestException(
-      `maxViews must be an integer between 1 and ${maxAllowedViews}`,
+      `max_views is not allowed for the ${plan} plan`,
     );
   }
-  const expiresAt = dto.expiresAt ? new Date(dto.expiresAt) : null;
-  if (dto.expiresAt && (!expiresAt || Number.isNaN(expiresAt.getTime()))) {
-    throw new BadRequestException('expiresAt must be a valid ISO date');
-  }
-  if (expiresAt && expiresAt <= new Date()) {
-    throw new BadRequestException('expiresAt must be in the future');
-  }
-  const maxExpiryDays = plan === 'free' ? 7 : 30;
+
+  const maxExpirySeconds = 30 * 86400;
   if (
-    expiresAt &&
-    expiresAt.getTime() > Date.now() + maxExpiryDays * 24 * 60 * 60 * 1000
+    !Number.isInteger(dto.expires_in) ||
+    dto.expires_in < 60 ||
+    dto.expires_in > maxExpirySeconds
   ) {
     throw new ConflictException(
-      `The ${plan} plan allows expiry up to ${maxExpiryDays} days`,
+      `expires_in must be between 60 and ${maxExpirySeconds} seconds for the ${plan} plan`,
     );
   }
+
+  const recipientEmail = dto.recipient_email?.trim().toLowerCase() || null;
+  if (recipientEmail && !['pro', 'team'].includes(plan)) {
+    throw new ConflictException(
+      'Recipient email verification requires a Pro or Team plan',
+    );
+  }
+  let authHash: string | null = null;
+  if (dto.auth) {
+    const pepper = config.get<string>('SECRET_AUTH_PEPPER');
+    if (!pepper || Buffer.byteLength(pepper, 'utf8') < 32) {
+      throw new ServiceUnavailableException(
+        'SECRET_AUTH_PEPPER must contain at least 32 bytes',
+      );
+    }
+    const authBytes = decodeBase64Url(dto.auth, 'auth');
+    if (authBytes.length !== 32) {
+      throw new BadRequestException('auth must encode exactly 32 bytes');
+    }
+    authHash = createHmac('sha256', pepper).update(authBytes).digest('hex');
+  }
+
   return {
-    ciphertextRef: dto.ciphertextRef.trim(),
-    iv: dto.iv.trim(),
-    wrappedKey: dto.wrappedKey.trim(),
-    salt: dto.salt.trim(),
-    authHash: dto.authHash?.trim() || null,
+    ciphertext,
+    ciphertextRef: null,
+    iv,
+    wrappedKey: null,
+    salt: null,
+    kdf: {
+      algorithm: dto.kdf.algorithm,
+      ...(dto.kdf.salt ? { salt: dto.kdf.salt } : {}),
+      ...(dto.kdf.parameters ? { parameters: { ...dto.kdf.parameters } } : {}),
+    } satisfies Prisma.InputJsonObject,
+    authHash,
     label: dto.label?.trim().slice(0, 200) || null,
-    maxViews: dto.maxViews ?? 1,
-    expiresAt,
-    recipientEmailHash: dto.recipientEmailHash?.trim() || null,
+    maxViews,
+    expiresAt: new Date(Date.now() + dto.expires_in * 1000),
+    recipientEmail,
+    recipientEmailHash: recipientEmail ? hashValue(recipientEmail) : null,
   };
 }
 
-function validateAnonymousCreate(dto: CreateSecretDto) {
-  const data = validateCreate(dto, 'anonymous');
-  const now = Date.now();
-  if (data.ciphertextRef.length > 64 * 1024) {
-    throw new BadRequestException('Anonymous secrets are limited to 64 KB');
-  }
-  if (data.wrappedKey.length > 8192) {
-    throw new BadRequestException('Anonymous wrapped keys are too large');
-  }
-  if (data.maxViews > 3) {
-    throw new BadRequestException('Anonymous secrets allow at most 3 views');
-  }
-  if (!data.expiresAt || data.expiresAt.getTime() > now + 24 * 60 * 60 * 1000) {
+function validateKdf(kdf: CreateSecretDto['kdf'], auth?: string): void {
+  if (kdf.algorithm === 'Argon2id') {
+    const parameters = kdf.parameters;
+    const saltBytes = kdf.salt
+      ? decodeBase64Url(kdf.salt, 'kdf.salt')
+      : Buffer.alloc(0);
+    if (
+      !auth ||
+      saltBytes.length !== 16 ||
+      parameters?.m !== 65536 ||
+      parameters.t !== 3 ||
+      parameters.p !== 1
+    ) {
+      throw new BadRequestException(
+        'Argon2id requires a passphrase and the supported m=65536, t=3, p=1 parameters',
+      );
+    }
+  } else if (auth) {
     throw new BadRequestException(
-      'Anonymous secrets must expire within 24 hours',
+      'Passphrase authentication requires Argon2id KDF parameters',
     );
   }
-  return data;
+}
+
+function decodeBase64Url(value: string, field: string): Buffer {
+  if (!isCanonicalBase64Url(value)) {
+    throw new BadRequestException(`${field} must be unpadded base64url`);
+  }
+  const decoded = Buffer.from(value, 'base64url');
+  if (decoded.toString('base64url') !== value) {
+    throw new BadRequestException(`${field} must be valid unpadded base64url`);
+  }
+  return decoded;
+}
+
+function isCanonicalBase64Url(value: string): boolean {
+  return (
+    /^[A-Za-z0-9_-]+$/.test(value) &&
+    Buffer.from(value, 'base64url').toString('base64url') === value
+  );
+}
+
+function createResponse(secret: {
+  id: string;
+  status: string;
+  maxViews: number | null;
+  expiresAt: Date | null;
+}) {
+  return {
+    id: secret.id,
+    status: secret.status,
+    expires_at: secret.expiresAt,
+    max_views: secret.maxViews,
+  };
+}
+
+function generatePublicId(): string {
+  const alphabet =
+    '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+  return Array.from(
+    { length: 22 },
+    () => alphabet[randomInt(alphabet.length)],
+  ).join('');
+}
+
+function safeCompare(left: string, right: string): boolean {
+  const leftBuffer = Buffer.from(left, 'utf8');
+  const rightBuffer = Buffer.from(right, 'utf8');
+  return (
+    leftBuffer.length === rightBuffer.length &&
+    timingSafeEqual(leftBuffer, rightBuffer)
+  );
+}
+
+function validateSecretId(id: string): void {
+  if (!/^[0-9A-Za-z]{22}$/.test(id) && !/^[a-z0-9]{25}$/.test(id)) {
+    throw new NotFoundException('Secret not found');
+  }
 }
 
 function safeHashCompare(expectedHash: string, candidate: string): boolean {
@@ -643,12 +1049,7 @@ function safeFilename(filename: string): string {
   return filename.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120);
 }
 
-function withoutAuthHash<T extends { authHash: string | null }>(secret: T) {
-  const { authHash: _authHash, ...safe } = secret;
-  return safe;
-}
-
-function isMissingS3Object(error: unknown): boolean {
+function isMissingStoredObject(error: unknown): boolean {
   if (typeof error !== 'object' || error === null) return false;
   if (
     '$metadata' in error &&

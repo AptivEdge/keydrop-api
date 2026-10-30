@@ -16,6 +16,8 @@ import {
   cursorPage,
   cursorPaginationArgs,
 } from '../common/dto/cursor-pagination.dto.js';
+import type { AuthenticatedUser } from '../common/auth/guards/supabase-auth.guard.js';
+import type { CreateAdminBillingPlanDto } from './dto/billing.dto.js';
 
 @Injectable()
 export class BillingService {
@@ -31,6 +33,148 @@ export class BillingService {
     if (keyId && keySecret) {
       this.razorpay = new Razorpay({ key_id: keyId, key_secret: keySecret });
     }
+  }
+
+  listAdminBillingPlans() {
+    return this.prisma.billingPlan.findMany({
+      select: {
+        id: true,
+        tier: true,
+        interval: true,
+        providerPlanId: true,
+        name: true,
+        amount: true,
+        currency: true,
+        active: true,
+        createdAt: true,
+      },
+      orderBy: [{ active: 'desc' }, { tier: 'asc' }, { interval: 'asc' }, { createdAt: 'desc' }],
+      take: 100,
+    });
+  }
+
+  async listPublicPricing() {
+    const managedPlans = await this.prisma.billingPlan.findMany({
+      where: { active: true },
+      select: { tier: true, interval: true, amount: true, currency: true },
+    });
+    const configured = new Map(
+      managedPlans.map((plan) => [`${plan.tier}:${plan.interval}`, plan]),
+    );
+    const fallbackPrices = {
+      pro: { monthly: 29_900, yearly: 299_000 },
+      team: { monthly: 99_900, yearly: 999_000 },
+    } as const;
+    return (['pro', 'team'] as const).flatMap((tier) =>
+      (['monthly', 'yearly'] as const).map((interval) => {
+        const plan = configured.get(`${tier}:${interval}`);
+        return {
+          tier,
+          interval,
+          amount: plan?.amount ?? fallbackPrices[tier][interval],
+          currency: plan?.currency ?? 'INR',
+        };
+      }),
+    );
+  }
+
+  async createAdminBillingPlan(
+    dto: CreateAdminBillingPlanDto,
+    actor: AuthenticatedUser,
+  ) {
+    if (!this.razorpay) {
+      throw new ServiceUnavailableException('Razorpay is not configured');
+    }
+
+    const name = dto.name.trim();
+    const description = dto.description?.trim();
+    const reason = dto.reason.trim();
+    if (
+      name.length < 1 ||
+      name.length > 80 ||
+      reason.length < 10 ||
+      reason.length > 1000 ||
+      !Number.isSafeInteger(dto.amount) ||
+      dto.amount < 100 ||
+      dto.amount > 100_000_000 ||
+      (description?.length ?? 0) > 255
+    ) {
+      throw new BadRequestException('Plan details or price are invalid');
+    }
+    const providerPlan = await this.razorpay.plans.create({
+      period: dto.interval,
+      interval: 1,
+      item: {
+        name,
+        amount: dto.amount,
+        currency: 'INR',
+        ...(description ? { description } : {}),
+      },
+      notes: {
+        keydrop_tier: dto.tier,
+        keydrop_interval: dto.interval,
+      },
+    });
+    if (
+      !providerPlan.id ||
+      providerPlan.item?.amount !== dto.amount ||
+      providerPlan.item?.currency !== 'INR' ||
+      providerPlan.period !== dto.interval ||
+      providerPlan.interval !== 1
+    ) {
+      throw new ServiceUnavailableException(
+        'Razorpay returned a plan that does not match the requested price and billing period',
+      );
+    }
+
+    return this.prisma.$transaction(
+      async (transaction) => {
+        await transaction.billingPlan.updateMany({
+          where: { tier: dto.tier, interval: dto.interval, active: true },
+          data: { active: false },
+        });
+        const plan = await transaction.billingPlan.create({
+          data: {
+            tier: dto.tier,
+            interval: dto.interval,
+            providerPlanId: providerPlan.id,
+            name,
+            amount: dto.amount,
+            currency: 'INR',
+            createdById: actor.userId,
+          },
+          select: {
+            id: true,
+            tier: true,
+            interval: true,
+            providerPlanId: true,
+            name: true,
+            amount: true,
+            currency: true,
+            active: true,
+            createdAt: true,
+          },
+        });
+        await transaction.adminAuditLog.create({
+          data: {
+            actorId: actor.userId,
+            action: 'billing_plan_created',
+            targetType: 'billing_plan',
+            targetId: plan.id,
+            reason,
+            metadata: {
+              tier: dto.tier,
+              interval: dto.interval,
+              providerPlanId: providerPlan.id,
+              amount: dto.amount,
+              currency: 'INR',
+            },
+          },
+        });
+        return plan;
+      },
+      { isolationLevel: 'Serializable' },
+    );
   }
 
   async overview(userId: string) {
@@ -49,6 +193,7 @@ export class BillingService {
         currency: true,
         pendingTier: true,
         pendingInterval: true,
+        cancelAtPeriodEnd: true,
         status: true,
         currentPeriodStart: true,
         currentPeriodEnd: true,
@@ -71,6 +216,7 @@ export class BillingService {
         currency: true,
         pendingTier: true,
         pendingInterval: true,
+        cancelAtPeriodEnd: true,
         status: true,
         currentPeriodStart: true,
         currentPeriodEnd: true,
@@ -123,28 +269,35 @@ export class BillingService {
   async cancelSubscription(userId: string, subscriptionId: string) {
     const subscription = await this.prisma.subscription.findFirst({
       where: { id: subscriptionId, userId },
-      select: { id: true, status: true, planId: true },
+      select: {
+        id: true,
+        status: true,
+        planId: true,
+        cancelAtPeriodEnd: true,
+        currentPeriodEnd: true,
+      },
     });
     if (!subscription) throw new NotFoundException('Subscription not found');
     if (subscription.status === 'canceled') {
       throw new ConflictException('Subscription is already canceled');
     }
+    if (subscription.cancelAtPeriodEnd) {
+      throw new ConflictException('Subscription cancellation is already scheduled');
+    }
     if (!this.razorpay) {
       throw new ServiceUnavailableException('Razorpay is not configured');
     }
-    await this.razorpay.subscriptions.cancel(subscription.planId, false);
-    return this.prisma.$transaction(async (transaction) => {
-      const canceled = await transaction.subscription.update({
-        where: { id: subscription.id },
-        data: { status: 'canceled' },
-        select: { id: true, userId: true, status: true, updatedAt: true },
-      });
-      await this.synchronizeUserPlan(transaction, canceled.userId);
-      return {
-        id: canceled.id,
-        status: canceled.status,
-        updatedAt: canceled.updatedAt,
-      };
+    await this.razorpay.subscriptions.cancel(subscription.planId, true);
+    return this.prisma.subscription.update({
+      where: { id: subscription.id },
+      data: { cancelAtPeriodEnd: true },
+      select: {
+        id: true,
+        status: true,
+        cancelAtPeriodEnd: true,
+        currentPeriodEnd: true,
+        updatedAt: true,
+      },
     });
   }
 
@@ -173,15 +326,34 @@ export class BillingService {
     userId: string,
     plan: 'pro' | 'team',
     interval: 'monthly' | 'yearly',
+    expectedAmount?: number,
   ) {
     if (!this.razorpay) {
       throw new ServiceUnavailableException('Razorpay is not configured');
     }
     const currency: BillingCurrency = 'INR';
-    const planId = this.getProviderPlanId(plan, interval);
-    if (!planId) {
+    const configured = await this.getConfiguredProviderPlan(plan, interval);
+    if (!configured) {
       throw new ServiceUnavailableException(
         `Razorpay ${currency} plan is not configured`,
+      );
+    }
+    if (
+      expectedAmount !== undefined &&
+      expectedAmount !== configured.amount
+    ) {
+      throw new ConflictException(
+        'The plan price has changed. Refresh the pricing page before continuing.',
+      );
+    }
+    const planId = configured.providerPlanId;
+    const providerPlan = await this.razorpay.plans.fetch(planId);
+    if (
+      providerPlan.item?.amount !== configured.amount
+      || providerPlan.item?.currency !== configured.currency
+    ) {
+      throw new ServiceUnavailableException(
+        `Razorpay ${currency} plan does not match the published ${plan} ${interval} price`,
       );
     }
     const user = await this.prisma.user.findUnique({
@@ -262,12 +434,13 @@ export class BillingService {
         'Only INR subscriptions can be changed with this API',
       );
     }
-    const providerPlanId = this.getProviderPlanId(plan, interval);
-    if (!providerPlanId) {
+    const configured = await this.getConfiguredProviderPlan(plan, interval);
+    if (!configured) {
       throw new ServiceUnavailableException(
         'Razorpay INR plan is not configured',
       );
     }
+    const providerPlanId = configured.providerPlanId;
     if (
       subscription.providerPlanId === providerPlanId ||
       (subscription.tier === plan && subscription.billingInterval === interval)
@@ -345,7 +518,7 @@ export class BillingService {
     };
   }
 
-  verifyCheckoutSignature(
+  async verifyCheckoutSignature(
     userId: string,
     subscriptionId: string,
     paymentId: string,
@@ -360,16 +533,154 @@ export class BillingService {
     if (!safeEqual(expected, signature)) {
       throw new BadRequestException('Invalid payment signature');
     }
-    return this.prisma.subscription
-      .findFirst({
-        where: { planId: subscriptionId, userId },
-        select: { id: true },
-      })
-      .then((subscription) => {
-        if (!subscription)
-          throw new NotFoundException('Subscription not found');
-        return { verified: true, webhookRequired: true };
+    const subscription = await this.prisma.subscription.findFirst({
+      where: { planId: subscriptionId, userId },
+      select: { id: true },
+    });
+    if (!subscription) throw new NotFoundException('Subscription not found');
+
+    const refreshed = await this.refreshProviderSubscription(
+      userId,
+      subscriptionId,
+    );
+    const activated = refreshed.status === 'active';
+    const { plan } = await this.overview(userId);
+    return {
+      verified: true,
+      activated,
+      webhookRequired: !activated,
+      plan,
+    };
+  }
+
+  async refreshBillingStatus(userId: string) {
+    if (!this.razorpay) {
+      throw new ServiceUnavailableException('Razorpay is not configured');
+    }
+    const subscriptions = await this.prisma.subscription.findMany({
+      where: {
+        userId,
+        status: { in: ['active', 'past_due', 'incomplete', 'trialing'] },
+      },
+      select: { planId: true },
+      orderBy: { createdAt: 'desc' },
+      take: 10,
+    });
+    for (const subscription of subscriptions) {
+      await this.refreshProviderSubscription(userId, subscription.planId);
+    }
+    return this.overview(userId);
+  }
+
+  private async refreshProviderSubscription(
+    userId: string,
+    providerSubscriptionId: string,
+  ) {
+    if (!this.razorpay) {
+      throw new ServiceUnavailableException('Razorpay is not configured');
+    }
+    const subscription = await this.prisma.subscription.findFirst({
+      where: { planId: providerSubscriptionId, userId },
+      select: {
+        id: true,
+        planId: true,
+        providerPlanId: true,
+        pendingProviderPlanId: true,
+        pendingTier: true,
+        pendingInterval: true,
+      },
+    });
+    if (!subscription) throw new NotFoundException('Subscription not found');
+
+    const fetchStartedAt = new Date();
+    const remote =
+      await this.razorpay.subscriptions.fetch(providerSubscriptionId);
+    if (remote.id !== providerSubscriptionId) {
+      throw new ServiceUnavailableException(
+        'Razorpay returned a different subscription than requested',
+      );
+    }
+
+    const status = mapProviderSubscriptionStatus(remote.status);
+    const configuredPlan = await this.configuredPlan(remote.plan_id);
+    if (remote.status === 'active' && !configuredPlan) {
+      throw new ServiceUnavailableException(
+        'The active Razorpay subscription does not match a configured Keydrop plan',
+      );
+    }
+
+    return this.prisma.$transaction(async (transaction) => {
+      const latest = await transaction.subscription.findUnique({
+        where: { id: subscription.id },
+        select: {
+          lastProviderEventAt: true,
+          pastDueSince: true,
+          pendingProviderPlanId: true,
+          pendingTier: true,
+          pendingInterval: true,
+        },
       });
+      if (!latest) throw new NotFoundException('Subscription not found');
+
+      if (
+        latest.lastProviderEventAt &&
+        latest.lastProviderEventAt > fetchStartedAt
+      ) {
+        return transaction.subscription.findUniqueOrThrow({
+          where: { id: subscription.id },
+          select: { status: true, tier: true },
+        });
+      }
+
+      const planChangeConfirmed =
+        !!latest.pendingProviderPlanId &&
+        remote.plan_id === latest.pendingProviderPlanId;
+      const updated = await transaction.subscription.update({
+        where: { id: subscription.id },
+        data: {
+          status,
+          ...(status === 'past_due'
+            ? { pastDueSince: latest.pastDueSince ?? fetchStartedAt }
+            : status === 'active'
+              ? { pastDueSince: null }
+              : {}),
+          ...(!latest.pendingProviderPlanId || planChangeConfirmed
+            ? { providerPlanId: remote.plan_id }
+            : {}),
+          ...(planChangeConfirmed
+            ? {
+                tier: latest.pendingTier ?? configuredPlan?.tier,
+                billingInterval:
+                  latest.pendingInterval ?? configuredPlan?.interval,
+                pendingTier: null,
+                pendingInterval: null,
+                pendingProviderPlanId: null,
+              }
+            : configuredPlan && !latest.pendingProviderPlanId
+              ? {
+                  tier: configuredPlan.tier,
+                  billingInterval: configuredPlan.interval,
+                  currency: configuredPlan.currency,
+                }
+              : {}),
+          currentPeriodStart: remote.current_start
+            ? new Date(remote.current_start * 1000)
+            : undefined,
+          currentPeriodEnd: remote.current_end
+            ? new Date(remote.current_end * 1000)
+            : undefined,
+          cancelAtPeriodEnd:
+            status === 'canceled'
+              ? false
+              : readCancelAtCycleEnd(remote),
+        },
+        select: { status: true, tier: true },
+      });
+      if (status === 'active' || status === 'canceled') {
+        await this.synchronizeUserPlan(transaction, userId);
+      }
+      return updated;
+    });
   }
 
   async reconcilePastDueSubscriptions(): Promise<void> {
@@ -453,6 +764,7 @@ export class BillingService {
       select: {
         id: true,
         userId: true,
+        cancelAtPeriodEnd: true,
         planId: true,
         pendingProviderPlanId: true,
         pendingTier: true,
@@ -474,7 +786,7 @@ export class BillingService {
         const configuredPlan =
           subscription.pendingProviderPlanId && !planChangeConfirmed
             ? undefined
-            : this.configuredPlan(remote.plan_id);
+            : await this.configuredPlan(remote.plan_id);
         await this.prisma.$transaction(async (transaction) => {
           const existing = await transaction.subscription.findUnique({
             where: { id: subscription.id },
@@ -518,6 +830,10 @@ export class BillingService {
               currentPeriodEnd: remote.current_end
                 ? new Date(remote.current_end * 1000)
                 : undefined,
+              cancelAtPeriodEnd:
+                status === 'canceled'
+                  ? false
+                  : readCancelAtCycleEnd(remote),
               pastDueSince:
                 status === 'past_due'
                   ? (existing?.pastDueSince ?? new Date())
@@ -743,7 +1059,7 @@ export class BillingService {
     }
 
     const status = mapRazorpayStatus(event);
-    const configuredPlan = this.configuredPlan(entity.plan_id);
+    const configuredPlan = await this.configuredPlan(entity.plan_id);
     await prisma.subscription.update({
       where: { id: subscription.id },
       data: {
@@ -778,6 +1094,10 @@ export class BillingService {
         currentPeriodEnd: entity.current_end
           ? new Date(entity.current_end * 1000)
           : undefined,
+        cancelAtPeriodEnd:
+          status === 'canceled'
+            ? false
+            : readCancelAtCycleEnd(entity),
       },
     });
     if (status === 'active' || status === 'canceled') {
@@ -1066,22 +1386,41 @@ export class BillingService {
     }
   }
 
-  private getProviderPlanId(
+  private async getConfiguredProviderPlan(
     tier: 'pro' | 'team',
     interval: 'monthly' | 'yearly',
   ) {
+    const managedPlan = await this.prisma.billingPlan?.findFirst({
+      where: { tier, interval, active: true },
+      select: { providerPlanId: true, amount: true, currency: true },
+    });
+    if (managedPlan) return managedPlan;
+
     const prefix = `RAZORPAY_${tier.toUpperCase()}_${interval.toUpperCase()}`;
-    return (
-      this.config.get<string>(`${prefix}_PLAN_ID`) ??
-      this.config.get<string>(`${prefix}_INR_PLAN_ID`)
-    );
+    const providerPlanId = this.config.get<string>(`${prefix}_PLAN_ID`)
+      ?? this.config.get<string>(`${prefix}_INR_PLAN_ID`);
+    if (!providerPlanId) return undefined;
+    const amount = {
+      pro: { monthly: 29_900, yearly: 299_000 },
+      team: { monthly: 99_900, yearly: 999_000 },
+    }[tier][interval];
+    return { providerPlanId, amount, currency: 'INR' };
   }
 
-  private configuredPlan(providerPlanId?: string) {
+  private async configuredPlan(providerPlanId?: string) {
     if (!providerPlanId) return undefined;
+    const managedPlan = await this.prisma.billingPlan?.findUnique({
+      where: { providerPlanId },
+      select: { tier: true, interval: true, currency: true },
+    });
+    if (managedPlan) return managedPlan;
     for (const tier of ['pro', 'team'] as const) {
       for (const interval of ['monthly', 'yearly'] as const) {
-        if (this.getProviderPlanId(tier, interval) === providerPlanId) {
+        const prefix = `RAZORPAY_${tier.toUpperCase()}_${interval.toUpperCase()}`;
+        if (
+          this.config.get<string>(`${prefix}_PLAN_ID`) === providerPlanId ||
+          this.config.get<string>(`${prefix}_INR_PLAN_ID`) === providerPlanId
+        ) {
           return { tier, interval, currency: 'INR' as const };
         }
       }
@@ -1105,6 +1444,7 @@ type RazorpayWebhook = {
         status?: string;
         current_start?: number | null;
         current_end?: number | null;
+        cancel_at_cycle_end?: boolean;
       };
     };
     payment?: { entity?: RazorpayPaymentEntity };
@@ -1119,6 +1459,7 @@ type RazorpaySubscriptionEntity = {
   status?: string;
   current_start?: number | null;
   current_end?: number | null;
+  cancel_at_cycle_end?: boolean;
 };
 
 type RazorpayPaymentEntity = {
@@ -1176,6 +1517,16 @@ function mapProviderSubscriptionStatus(status: string) {
     default:
       return 'incomplete' as const;
   }
+}
+
+function readCancelAtCycleEnd(subscription: object): boolean | undefined {
+  if (!('cancel_at_cycle_end' in subscription)) return undefined;
+  const cancelAtCycleEnd = subscription.cancel_at_cycle_end;
+  if (cancelAtCycleEnd === undefined) return undefined;
+  if (typeof cancelAtCycleEnd !== 'boolean') {
+    throw new Error('Razorpay returned an invalid cancellation state');
+  }
+  return cancelAtCycleEnd;
 }
 
 function mapInvoiceStatus(status?: string) {

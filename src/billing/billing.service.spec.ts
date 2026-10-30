@@ -34,23 +34,190 @@ describe('BillingService', () => {
   it('rejects checkout verification with an invalid signature', async () => {
     const { service } = createService();
 
-    expect(() =>
+    await expect(
       service.verifyCheckoutSignature('user-1', 'sub-1', 'pay-1', 'invalid'),
-    ).toThrow(BadRequestException);
+    ).rejects.toBeInstanceOf(BadRequestException);
   });
 
-  it('verifies a checkout signature without activating the plan', async () => {
-    const { service, prisma } = createService();
+  it('activates the purchased plan from Razorpay after signature verification', async () => {
+    const providerSubscription = {
+      id: 'sub-1',
+      plan_id: 'plan-pro-monthly-inr',
+      status: 'active',
+      current_start: 1_800_000_000,
+      current_end: 1_802_592_000,
+    };
+    const prisma = {
+      subscription: {
+        findFirst: vi.fn().mockResolvedValue({
+          id: 'local-subscription',
+          planId: 'sub-1',
+        }),
+        findUnique: vi.fn().mockResolvedValue({
+          lastProviderEventAt: null,
+          pastDueSince: null,
+          pendingProviderPlanId: null,
+          pendingTier: null,
+          pendingInterval: null,
+        }),
+        update: vi.fn().mockResolvedValue({ status: 'active', tier: 'pro' }),
+        findMany: vi.fn().mockResolvedValue([{ tier: 'pro' }]),
+      },
+      user: {
+        findUnique: vi.fn().mockResolvedValue({ plan: 'pro' }),
+        update: vi.fn().mockResolvedValue({}),
+      },
+      apiKey: { updateMany: vi.fn() },
+      $transaction: vi.fn(),
+    };
+    prisma.$transaction.mockImplementation(
+      async (callback: (tx: never) => Promise<unknown>) =>
+        callback(prisma as never),
+    );
+    const { service } = createService(prisma);
+    const fetch = vi.fn().mockResolvedValue(providerSubscription);
+    Object.defineProperty(service, 'razorpay', {
+      value: { subscriptions: { fetch } },
+    });
     const signature = createHmac('sha256', 'checkout-secret')
       .update('pay-1|sub-1')
       .digest('hex');
 
     await expect(
       service.verifyCheckoutSignature('user-1', 'sub-1', 'pay-1', signature),
-    ).resolves.toEqual({ verified: true, webhookRequired: true });
+    ).resolves.toEqual({
+      verified: true,
+      activated: true,
+      webhookRequired: false,
+      plan: 'pro',
+    });
     expect(prisma.subscription.findFirst).toHaveBeenCalledWith({
       where: { planId: 'sub-1', userId: 'user-1' },
       select: { id: true },
+    });
+    expect(fetch).toHaveBeenCalledWith('sub-1');
+    expect(prisma.subscription.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'local-subscription' },
+        data: expect.objectContaining({
+          status: 'active',
+          tier: 'pro',
+          billingInterval: 'monthly',
+          providerPlanId: 'plan-pro-monthly-inr',
+        }),
+      }),
+    );
+    expect(prisma.user.update).toHaveBeenCalledWith({
+      where: { id: 'user-1' },
+      data: { plan: 'pro' },
+    });
+  });
+
+  it('keeps checkout pending until Razorpay reports an active subscription', async () => {
+    const prisma = {
+      subscription: {
+        findFirst: vi.fn().mockResolvedValue({
+          id: 'local-subscription',
+          planId: 'sub-1',
+        }),
+        findUnique: vi.fn().mockResolvedValue({
+          lastProviderEventAt: null,
+          pastDueSince: null,
+          pendingProviderPlanId: null,
+          pendingTier: null,
+          pendingInterval: null,
+        }),
+        update: vi.fn().mockResolvedValue({ status: 'incomplete', tier: 'pro' }),
+      },
+      user: {
+        findUnique: vi.fn().mockResolvedValue({ plan: 'free' }),
+        update: vi.fn(),
+      },
+      $transaction: vi.fn(),
+    };
+    prisma.$transaction.mockImplementation(
+      async (callback: (tx: never) => Promise<unknown>) =>
+        callback(prisma as never),
+    );
+    const { service } = createService(prisma);
+    Object.defineProperty(service, 'razorpay', {
+      value: {
+        subscriptions: {
+          fetch: vi.fn().mockResolvedValue({
+            id: 'sub-1',
+            plan_id: 'plan-pro-monthly-inr',
+            status: 'authenticated',
+          }),
+        },
+      },
+    });
+    const signature = createHmac('sha256', 'checkout-secret')
+      .update('pay-1|sub-1')
+      .digest('hex');
+
+    await expect(
+      service.verifyCheckoutSignature('user-1', 'sub-1', 'pay-1', signature),
+    ).resolves.toEqual({
+      verified: true,
+      activated: false,
+      webhookRequired: true,
+      plan: 'free',
+    });
+    expect(prisma.user.update).not.toHaveBeenCalled();
+  });
+
+  it('refreshes an earlier checkout when webhook activation was missed', async () => {
+    const prisma = {
+      subscription: {
+        findMany: vi.fn()
+          .mockResolvedValueOnce([{ planId: 'sub-1' }])
+          .mockResolvedValueOnce([{ tier: 'pro' }]),
+        findFirst: vi.fn().mockResolvedValue({
+          id: 'local-subscription',
+          planId: 'sub-1',
+        }),
+        findUnique: vi.fn().mockResolvedValue({
+          lastProviderEventAt: null,
+          pastDueSince: null,
+          pendingProviderPlanId: null,
+          pendingTier: null,
+          pendingInterval: null,
+        }),
+        update: vi.fn().mockResolvedValue({ status: 'active', tier: 'pro' }),
+      },
+      user: {
+        findUnique: vi.fn().mockResolvedValue({ plan: 'pro' }),
+        update: vi.fn().mockResolvedValue({}),
+      },
+      apiKey: { updateMany: vi.fn() },
+      $transaction: vi.fn(),
+    };
+    prisma.$transaction.mockImplementation(
+      async (callback: (tx: never) => Promise<unknown>) =>
+        callback(prisma as never),
+    );
+    const { service } = createService(prisma);
+    const fetch = vi.fn().mockResolvedValue({
+      id: 'sub-1',
+      plan_id: 'plan-pro-monthly-inr',
+      status: 'active',
+    });
+    Object.defineProperty(service, 'razorpay', {
+      value: { subscriptions: { fetch } },
+    });
+
+    await expect(service.refreshBillingStatus('user-1')).resolves.toMatchObject({
+      plan: 'pro',
+    });
+    expect(fetch).toHaveBeenCalledWith('sub-1');
+    expect(prisma.subscription.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: 'active', tier: 'pro' }),
+      }),
+    );
+    expect(prisma.user.update).toHaveBeenCalledWith({
+      where: { id: 'user-1' },
+      data: { plan: 'pro' },
     });
   });
 
@@ -64,7 +231,7 @@ describe('BillingService', () => {
     ).rejects.toBeInstanceOf(ServiceUnavailableException);
   });
 
-  it('creates an INR checkout and stores INR currency', async () => {
+  it('creates an INR checkout for the published plan price', async () => {
     const prisma = {
       user: { findUnique: vi.fn().mockResolvedValue({ email: 'u@test.com' }) },
       subscription: {
@@ -74,8 +241,14 @@ describe('BillingService', () => {
     };
     const { service } = createService(prisma);
     const providerCreate = vi.fn().mockResolvedValue({ id: 'sub-inr-1' });
+    const providerPlanFetch = vi.fn().mockResolvedValue({
+      item: { amount: 29_900, currency: 'INR' },
+    });
     Object.defineProperty(service, 'razorpay', {
-      value: { subscriptions: { create: providerCreate } },
+      value: {
+        plans: { fetch: providerPlanFetch },
+        subscriptions: { create: providerCreate },
+      },
     });
 
     await expect(
@@ -100,6 +273,7 @@ describe('BillingService', () => {
         currency: 'INR',
       },
     });
+    expect(providerPlanFetch).toHaveBeenCalledWith('plan-pro-monthly-inr');
     expect(prisma.subscription.create).toHaveBeenCalledWith({
       data: {
         userId: 'user-1',
@@ -111,6 +285,67 @@ describe('BillingService', () => {
         status: 'incomplete',
       },
     });
+  });
+
+  it('rejects checkout when the configured provider plan does not match the displayed price', async () => {
+    const prisma = {};
+    const { service } = createService(prisma);
+    Object.defineProperty(service, 'razorpay', {
+      value: {
+        plans: {
+          fetch: vi.fn().mockResolvedValue({
+            item: { amount: 1, currency: 'INR' },
+          }),
+        },
+        subscriptions: { create: vi.fn() },
+      },
+    });
+
+    await expect(
+      service.createCheckout('user-1', 'pro', 'monthly'),
+    ).rejects.toBeInstanceOf(ServiceUnavailableException);
+  });
+
+  it('schedules subscription cancellation at the end of the paid period', async () => {
+    const subscription = {
+      id: 'local-subscription',
+      status: 'active',
+      planId: 'rzp-subscription-1',
+      cancelAtPeriodEnd: false,
+      currentPeriodEnd: new Date('2026-11-25T00:00:00.000Z'),
+    };
+    const prisma = {
+      subscription: {
+        findFirst: vi.fn().mockResolvedValue(subscription),
+        update: vi.fn().mockResolvedValue({
+          id: subscription.id,
+          status: 'active',
+          cancelAtPeriodEnd: true,
+          currentPeriodEnd: subscription.currentPeriodEnd,
+          updatedAt: new Date(),
+        }),
+      },
+    };
+    const { service } = createService(prisma);
+    const cancel = vi.fn().mockResolvedValue({});
+    Object.defineProperty(service, 'razorpay', {
+      value: { subscriptions: { cancel } },
+    });
+
+    await expect(
+      service.cancelSubscription('user-1', subscription.id),
+    ).resolves.toMatchObject({
+      id: subscription.id,
+      status: 'active',
+      cancelAtPeriodEnd: true,
+      currentPeriodEnd: subscription.currentPeriodEnd,
+    });
+    expect(cancel).toHaveBeenCalledWith(subscription.planId, true);
+    expect(prisma.subscription.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: { cancelAtPeriodEnd: true },
+      }),
+    );
   });
 
   it('rejects refunds without a written reason', async () => {

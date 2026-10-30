@@ -16,7 +16,7 @@ export class CreateUserDto {
   @ApiProperty({ minLength: 1, maxLength: 255 })
   @IsString()
   @MaxLength(255)
-  cognitoSubject: string;
+  identitySubject: string;
 
   @ApiPropertyOptional({ enum: ['free', 'pro', 'team'], default: 'free' })
   @IsOptional()

@@ -2,6 +2,7 @@ import {
   MiddlewareConsumer,
   Module,
   NestModule,
+  OnApplicationShutdown,
   RequestMethod,
 } from '@nestjs/common';
 import { AppController } from './app.controller.js';
@@ -14,28 +15,36 @@ import { AccountModule } from './account/account.module.js';
 import { BillingModule } from './billing/billing.module.js';
 import { TeamsModule } from './teams/teams.module.js';
 import { SecretsModule } from './secrets/secrets.module.js';
+import { RequestsModule } from './requests/requests.module.js';
 import { LoggerMiddleware } from './logger/middleware/logger.middleware.js';
 import { APP_FILTER } from '@nestjs/core';
 import { AllExceptionsFilter } from './logger/filters/http-exception.filter.js';
 import { LoggerService } from './logger/services/logger.service.js';
 import { LoggerModule } from './logger/logger.module.js';
 import { RateLimitModule } from './common/rate-limit/rate-limit.module.js';
+import { EmailModule } from './email/email.module.js';
+import { AdminModerationModule } from './admin/admin-moderation.module.js';
 
 @Module({
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
+      envFilePath:
+        process.env.NODE_ENV === 'production' ? '.env' : ['.env.local', '.env'],
     }),
     PrismaModule,
     LoggerModule,
+    EmailModule,
     AuthModule,
     SecretsModule,
-    CronJobsModule,
+    RequestsModule,
+    CronJobsModule.register(),
     UsersModule,
     AccountModule,
     BillingModule,
     TeamsModule,
     RateLimitModule,
+    AdminModerationModule,
   ],
   controllers: [AppController],
   providers: [
@@ -48,10 +57,15 @@ import { RateLimitModule } from './common/rate-limit/rate-limit.module.js';
     },
   ],
 })
-export class AppModule implements NestModule {
+export class AppModule implements NestModule, OnApplicationShutdown {
   configure(consumer: MiddlewareConsumer) {
     consumer
       .apply(LoggerMiddleware)
-      .forRoutes({ path: '*', method: RequestMethod.ALL });
+      .forRoutes({ path: '{*path}', method: RequestMethod.ALL });
+  }
+
+  async onApplicationShutdown(signal?: string) {
+    // Cleanup logic here if needed
+    console.log(`Application is shutting down due to signal: ${signal}`);
   }
 }

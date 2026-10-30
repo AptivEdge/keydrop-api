@@ -3,13 +3,15 @@ import {
   Controller,
   Delete,
   Get,
+  HttpCode,
+  HttpStatus,
   Param,
   Patch,
   Post,
   Query,
 } from '@nestjs/common';
 import { CurrentUser } from '../common/auth/decorators/current-user.decorator.js';
-import type { AuthenticatedUser } from '../common/auth/guards/cognito-auth.guard.js';
+import type { AuthenticatedUser } from '../common/auth/guards/supabase-auth.guard.js';
 import { AccountService } from './account.service.js';
 import { CreateApiKeyDto } from './dto/api-key.dto.js';
 import { CursorPaginationDto } from '../common/dto/cursor-pagination.dto.js';
@@ -24,7 +26,7 @@ import {
 } from '@nestjs/swagger';
 
 @ApiTags('Users')
-@ApiBearerAuth('cognito')
+@ApiBearerAuth('supabase')
 @Controller('me')
 export class AccountController {
   constructor(private readonly account: AccountService) {}
@@ -115,6 +117,59 @@ export class AccountController {
   })
   secret(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
     return this.account.getSecret(user.userId, id);
+  }
+
+  @Post('secrets/:id/recovery')
+  @HttpCode(HttpStatus.OK)
+  @RequireApiKeyScope('secrets:write')
+  @ApiOperation({
+    summary: 'Revalidate and count an owned secret-link recovery',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Returns the number of link recoveries remaining.',
+    schema: {
+      type: 'object',
+      required: ['remainingRecoveries'],
+      properties: { remainingRecoveries: { type: 'integer', minimum: 0, maximum: 2 } },
+    },
+  })
+  @ApiResponse({
+    status: 423,
+    description: 'The secret was locked after the three permitted recoveries.',
+  })
+  recoverSecretLink(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+  ) {
+    return this.account.recoverSecretLink(user.userId, id);
+  }
+
+  @Post('secrets/:id/reveal')
+  @HttpCode(HttpStatus.OK)
+  @RequireApiKeyScope('secrets:read')
+  @ApiOperation({
+    summary: 'Return encrypted content for an owner-initiated reveal',
+  })
+  @ApiResponse({
+    status: 200,
+    description:
+      'Returns encrypted content without consuming a recipient view or exposing the decryption key.',
+    schema: {
+      type: 'object',
+      required: ['ciphertext', 'iv', 'kdf'],
+      properties: {
+        ciphertext: { type: 'string' },
+        iv: { type: 'string' },
+        kdf: { type: 'object' },
+      },
+    },
+  })
+  revealOwnedSecret(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+  ) {
+    return this.account.revealOwnedSecret(user.userId, id);
   }
 
   @Get('secrets/:id/events')
@@ -327,10 +382,10 @@ export class AccountController {
   @ApiResponse({
     status: 200,
     description:
-      'Deletes the Cognito identity and account-owned data. Billing records are retained with an anonymized account record.',
+      'Deletes the Supabase identity and account-owned data. Billing records are retained with an anonymized account record.',
   })
   deleteAccount(@CurrentUser() user: AuthenticatedUser) {
-    return this.account.deleteAccount(user.userId, user.username);
+    return this.account.deleteAccount(user.userId);
   }
 
   @Patch('notifications/:id/read')
@@ -373,22 +428,38 @@ function secretSummarySchema() {
       'status',
       'maxViews',
       'viewsUsed',
+      'recoveryCount',
       'expiresAt',
       'createdAt',
       'updatedAt',
+      'hasPassphrase',
+      'recipientLocked',
     ],
     properties: {
       id: { type: 'string' },
       label: { type: 'string', nullable: true },
       status: {
         type: 'string',
-        enum: ['active', 'viewed', 'expired', 'revoked'],
+        enum: [
+          'active',
+          'partially_viewed',
+          'viewed',
+          'expired',
+          'revoked',
+          'locked',
+        ],
       },
       maxViews: { type: 'integer', nullable: true },
       viewsUsed: { type: 'integer' },
+      recoveryCount: {
+        type: 'integer',
+        description: 'Number of the three permitted link recoveries already used.',
+      },
       expiresAt: { type: 'string', format: 'date-time', nullable: true },
       createdAt: { type: 'string', format: 'date-time' },
       updatedAt: { type: 'string', format: 'date-time' },
+      hasPassphrase: { type: 'boolean' },
+      recipientLocked: { type: 'boolean' },
     },
   };
 }

@@ -1,16 +1,16 @@
 import {
   ConflictException,
   ForbiddenException,
+  GoneException,
+  HttpException,
   Injectable,
+  HttpStatus,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import {
-  AdminDeleteUserCommand,
-  CognitoIdentityProviderClient,
-} from '@aws-sdk/client-cognito-identity-provider';
-import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createHash, randomBytes } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service.js';
@@ -29,8 +29,13 @@ import {
   type NotificationPreferences,
 } from '../common/notifications/notification-preferences.js';
 import type { NotificationPreferencesDto } from './dto/notification-preferences.dto.js';
-import type { Prisma } from '../generated/prisma/client.js';
+import { Prisma } from '../generated/prisma/client.js';
 import { BillingService } from '../billing/billing.service.js';
+import {
+  createObjectStorageClient,
+  getObjectStorageOptions,
+} from '../providers/object-storage-options.js';
+import { SupabaseClientProvider } from '../common/auth/services/supabase-client.provider.js';
 
 const planEntitlements = {
   free: {
@@ -68,9 +73,12 @@ const secretSummary = {
   status: true,
   maxViews: true,
   viewsUsed: true,
+  recoveryCount: true,
   expiresAt: true,
   createdAt: true,
   updatedAt: true,
+  authHash: true,
+  recipientEmailHash: true,
 } as const;
 
 @Injectable()
@@ -80,6 +88,7 @@ export class AccountService {
     private readonly storagePurge: StoragePurgeService,
     private readonly config: ConfigService,
     private readonly billing: BillingService,
+    @Optional() private readonly supabase?: SupabaseClientProvider,
   ) {}
 
   async entitlements(userId: string) {
@@ -97,7 +106,10 @@ export class AccountService {
     const [total, active, viewed, revoked] = await Promise.all([
       this.prisma.secret.count({ where: { ownerId: userId } }),
       this.prisma.secret.count({
-        where: { ownerId: userId, status: 'active' },
+        where: {
+          ownerId: userId,
+          status: { in: ['active', 'partially_viewed'] },
+        },
       }),
       this.prisma.secret.count({
         where: { ownerId: userId, status: 'viewed' },
@@ -116,7 +128,7 @@ export class AccountService {
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       ...cursorPaginationArgs(cursor, limit),
     });
-    return cursorPage(rows, limit);
+    return cursorPage(rows.map(toSecretSummary), limit);
   }
 
   async getSecret(userId: string, secretId: string) {
@@ -127,7 +139,150 @@ export class AccountService {
     if (!secret) {
       throw new NotFoundException('Secret not found');
     }
-    return secret;
+    return toSecretSummary(secret);
+  }
+
+  async recoverSecretLink(userId: string, secretId: string) {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const result = await this.prisma.$transaction(async (tx) => {
+        const secret = await tx.secret.findFirst({
+          where: { id: secretId, ownerId: userId },
+          select: {
+            status: true,
+            expiresAt: true,
+            maxViews: true,
+            viewsUsed: true,
+            recoveryCount: true,
+            ciphertextRef: true,
+            files: { select: { storageRef: true } },
+          },
+        });
+        if (!secret) throw new NotFoundException('Secret not found');
+        if (
+          !['active', 'partially_viewed'].includes(secret.status)
+          || (secret.expiresAt !== null && secret.expiresAt <= new Date())
+          || (secret.maxViews !== null && secret.viewsUsed >= secret.maxViews)
+        ) {
+          throw new GoneException('This secret is no longer available');
+        }
+
+        if (secret.recoveryCount < 3) {
+          const updated = await tx.secret.updateMany({
+            where: {
+              id: secretId,
+              ownerId: userId,
+              status: { in: ['active', 'partially_viewed'] },
+              recoveryCount: secret.recoveryCount,
+              OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+              ...(secret.maxViews === null
+                ? {}
+                : { viewsUsed: { lt: secret.maxViews } }),
+            },
+            data: { recoveryCount: { increment: 1 } },
+          });
+          if (updated.count === 1) {
+            await tx.auditEvent.create({
+              data: {
+                eventType: 'secret_link_recovered',
+                secretId,
+                actorId: userId,
+              },
+            });
+            return {
+              kind: 'recovered' as const,
+              remaining: 2 - secret.recoveryCount,
+            };
+          }
+          return null;
+        }
+
+        const updated = await tx.secret.updateMany({
+          where: {
+            id: secretId,
+            ownerId: userId,
+            status: { in: ['active', 'partially_viewed'] },
+            recoveryCount: { gte: 3 },
+            OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+          },
+          data: {
+            status: 'locked',
+            ciphertext: null,
+            ciphertextRef: null,
+            authHash: null,
+            kdf: Prisma.DbNull,
+            wrappedKey: null,
+            salt: null,
+          },
+        });
+        if (updated.count !== 1) return null;
+        await tx.auditEvent.create({
+          data: { eventType: 'locked', secretId, actorId: userId },
+        });
+        return {
+          kind: 'locked' as const,
+          storageRefs: [
+            secret.ciphertextRef,
+            ...secret.files.map((file) => file.storageRef),
+          ].filter((ref): ref is string => Boolean(ref)),
+        };
+      });
+
+      if (result === null) continue;
+      if (result.kind === 'locked') {
+        await this.storagePurge.purgeSecret(secretId, result.storageRefs);
+        throw new HttpException(
+          'The three link recovery attempts have been used. This secret is locked; create a new secret.',
+          HttpStatus.LOCKED,
+        );
+      }
+      return { remainingRecoveries: result.remaining };
+    }
+    throw new ConflictException('Secret changed while recovering its link. Try again.');
+  }
+
+  async revealOwnedSecret(userId: string, secretId: string) {
+    const secret = await this.prisma.secret.findFirst({
+      where: {
+        id: secretId,
+        ownerId: userId,
+        status: { in: ['active', 'partially_viewed'] },
+        OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+      },
+      select: {
+        ciphertext: true,
+        ciphertextRef: true,
+        iv: true,
+        kdf: true,
+        maxViews: true,
+        viewsUsed: true,
+      },
+    });
+    if (!secret || (secret.maxViews !== null && secret.viewsUsed >= secret.maxViews)) {
+      throw new GoneException('This secret is no longer available');
+    }
+
+    let ciphertext = secret.ciphertext;
+    if (ciphertext === null && secret.ciphertextRef) {
+      const storage = getObjectStorageOptions(this.config);
+      if (!storage) {
+        throw new ServiceUnavailableException('Object storage is not configured');
+      }
+      const response = await createObjectStorageClient(storage).send(
+        new GetObjectCommand({
+          Bucket: storage.bucket,
+          Key: secret.ciphertextRef,
+        }),
+      );
+      if (!response.Body) {
+        throw new ServiceUnavailableException('Encrypted secret content is unavailable');
+      }
+      ciphertext = await response.Body.transformToString();
+    }
+    if (ciphertext === null) {
+      throw new GoneException('Encrypted secret content is unavailable');
+    }
+
+    return { ciphertext, iv: secret.iv, kdf: secret.kdf };
   }
 
   async getSecretEvents(
@@ -165,7 +320,7 @@ export class AccountService {
     if (!secret) {
       throw new NotFoundException('Secret not found');
     }
-    if (!['viewed', 'expired', 'revoked'].includes(secret.status)) {
+    if (!['viewed', 'expired', 'revoked', 'locked'].includes(secret.status)) {
       throw new ConflictException('Only terminal secrets can be deleted');
     }
     const storage = await this.prisma.secret.findUnique({
@@ -177,7 +332,7 @@ export class AccountService {
       await this.storagePurge.purgeSecret(secret.id, [
         storage.ciphertextRef,
         ...storage.files.map((file) => file.storageRef),
-      ]);
+      ].filter((ref): ref is string => Boolean(ref)));
     }
   }
 
@@ -384,8 +539,10 @@ export class AccountService {
           expiresAt: true,
           createdAt: true,
           updatedAt: true,
+          ciphertext: true,
           ciphertextRef: true,
           iv: true,
+          kdf: true,
           wrappedKey: true,
           salt: true,
           files: {
@@ -512,9 +669,10 @@ export class AccountService {
         orderBy: { createdAt: 'asc' },
       }),
     ]);
-    const region = this.config.get<string>('S3_REGION');
-    const bucket = this.config.get<string>('S3_BUCKET');
-    const s3 = region && bucket ? new S3Client({ region }) : undefined;
+    const storage = getObjectStorageOptions(this.config);
+    const storageClient = storage
+      ? createObjectStorageClient(storage)
+      : undefined;
     const exportNow = new Date();
     const exportedSecrets = await Promise.all(
       secrets.map(async (secret) => ({
@@ -528,21 +686,24 @@ export class AccountService {
         updatedAt: secret.updatedAt,
         encryption: {
           ciphertextUrl:
-            s3 &&
-            bucket &&
+            storageClient &&
+            storage &&
+            secret.ciphertextRef &&
             secret.status === 'active' &&
             (!secret.expiresAt || secret.expiresAt > exportNow) &&
             (secret.maxViews === null || secret.viewsUsed < secret.maxViews)
               ? await getSignedUrl(
-                  s3,
+                  storageClient,
                   new GetObjectCommand({
-                    Bucket: bucket,
+                    Bucket: storage.bucket,
                     Key: secret.ciphertextRef,
                   }),
                   { expiresIn: 900 },
                 )
               : null,
+          ciphertext: secret.ciphertext,
           iv: secret.iv,
+          kdf: secret.kdf,
           wrappedKey: secret.wrappedKey,
           salt: secret.salt,
         },
@@ -555,11 +716,11 @@ export class AccountService {
             uploadedAt: file.uploadedAt,
             createdAt: file.createdAt,
             downloadUrl:
-              s3 && bucket && file.uploadedAt
+              storageClient && storage && file.uploadedAt
                 ? await getSignedUrl(
-                    s3,
+                    storageClient,
                     new GetObjectCommand({
-                      Bucket: bucket,
+                      Bucket: storage.bucket,
                       Key: file.storageRef,
                     }),
                     { expiresIn: 900 },
@@ -571,7 +732,7 @@ export class AccountService {
     );
     return {
       exportedAt: new Date().toISOString(),
-      storageDownloadsAvailable: Boolean(s3 && bucket),
+      storageDownloadsAvailable: Boolean(storageClient && storage),
       account: {
         id: user.id,
         email: user.email,
@@ -599,12 +760,16 @@ export class AccountService {
     };
   }
 
-  async deleteAccount(userId: string, cognitoUsername: string) {
+  async deleteAccount(
+    userId: string,
+    moderation?: { actorId: string; reason: string },
+  ) {
     const user = await this.prisma.user.findFirst({
       where: { id: userId, deletedAt: null },
       select: {
         id: true,
         email: true,
+        identitySubject: true,
         adminUser: { select: { role: true } },
         secrets: {
           select: {
@@ -621,26 +786,21 @@ export class AccountService {
         'Staff accounts must be removed by an administrator',
       );
     }
-    const userPoolId = this.config.get<string>('USER_COGNITO_USER_POOL_ID');
-    const region = this.config.get<string>('COGNITO_REGION');
-    if (!userPoolId || !region || !cognitoUsername?.trim()) {
-      throw new ServiceUnavailableException(
-        'Cognito account deletion is not configured',
-      );
-    }
     await this.billing.cancelSubscriptionsForAccountDeletion(userId);
-    const cognito = new CognitoIdentityProviderClient({ region });
-    try {
-      await cognito.send(
-        new AdminDeleteUserCommand({
-          UserPoolId: userPoolId,
-          Username: cognitoUsername.trim(),
-        }),
-      );
-    } catch (error) {
-      if (!isCognitoUserNotFound(error)) {
+    if (this.supabase && user.identitySubject) {
+      try {
+        const { error } = await this.supabase
+          .getAdminClient()
+          .auth.admin.deleteUser(user.identitySubject);
+        if (error && !isSupabaseUserNotFound(error)) {
+          throw new ServiceUnavailableException(
+            'Unable to delete the Supabase account',
+          );
+        }
+      } catch (error) {
+        if (error instanceof ServiceUnavailableException) throw error;
         throw new ServiceUnavailableException(
-          'Unable to delete the Cognito account',
+          'Unable to delete the Supabase account',
         );
       }
     }
@@ -710,19 +870,30 @@ export class AccountService {
         data: {
           email: `deleted-${userId}@deleted.invalid`,
           passwordHash: randomBytes(32).toString('hex'),
-          cognitoSubject: null,
+          identitySubject: null,
           emailVerifiedAt: null,
           notificationPreferences: {},
           plan: 'free',
           deletedAt: new Date(),
         },
       });
+      if (moderation) {
+        await tx.adminAuditLog.create({
+          data: {
+            actorId: moderation.actorId,
+            action: 'user_deleted',
+            targetType: 'user',
+            targetId: userId,
+            reason: moderation.reason,
+          },
+        });
+      }
     });
     for (const secret of user.secrets) {
       await this.storagePurge.purgeSecret(secret.id, [
         secret.ciphertextRef,
         ...secret.files.map((file) => file.storageRef),
-      ]);
+      ].filter((ref): ref is string => Boolean(ref)));
     }
     return { deleted: true };
   }
@@ -746,15 +917,26 @@ export class AccountService {
   }
 }
 
+function toSecretSummary<
+  T extends { authHash: string | null; recipientEmailHash: string | null },
+>(secret: T) {
+  const { authHash, recipientEmailHash, ...summary } = secret;
+  return {
+    ...summary,
+    hasPassphrase: Boolean(authHash),
+    recipientLocked: Boolean(recipientEmailHash),
+  };
+}
+
 function hashApiKey(key: string): string {
   return createHash('sha256').update(key).digest('hex');
 }
 
-function isCognitoUserNotFound(error: unknown): boolean {
+function isSupabaseUserNotFound(error: unknown): boolean {
   return (
     typeof error === 'object' &&
     error !== null &&
-    'name' in error &&
-    error.name === 'UserNotFoundException'
+    'code' in error &&
+    error.code === 'user_not_found'
   );
 }

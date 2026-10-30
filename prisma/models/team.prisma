@@ -4,6 +4,8 @@ model Team {
   createdBy String
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  suspendedAt DateTime?
+  suspensionReason String?
 
   creator     User             @relation("TeamCreator", fields: [createdBy], references: [id], onDelete: Restrict)
   members     TeamMember[]

@@ -9,14 +9,90 @@ if (!connectionString) {
   throw new Error('DATABASE_URL must be set before running the Prisma seed');
 }
 
+if (
+  process.env.NODE_ENV === 'production' ||
+  process.env.APP_ENV === 'production'
+) {
+  throw new Error('The Prisma seed must not run in production');
+}
+
 const adapter = new PrismaPg({ connectionString });
 const prisma = new PrismaClient({ adapter });
+
+type SeedUser = {
+  id: string;
+  email: string;
+  identitySubject: string;
+  plan: 'free' | 'pro' | 'team';
+  adminRole?: 'SUP' | 'TS' | 'BIL' | 'ENG' | 'ADM' | 'AUD';
+};
+
+const users: SeedUser[] = [
+  {
+    id: 'seed-user-free',
+    email: 'free@example.com',
+    identitySubject: 'seed-identity-free',
+    plan: 'free',
+  },
+  {
+    id: 'seed-user-bob',
+    email: 'bob@example.com',
+    identitySubject: 'seed-identity-bob',
+    plan: 'pro',
+  },
+  {
+    id: 'seed-user-alice',
+    email: 'alice@example.com',
+    identitySubject: 'seed-identity-alice',
+    plan: 'team',
+  },
+  {
+    id: 'seed-user-support',
+    email: 'support@example.com',
+    identitySubject: 'seed-identity-support',
+    plan: 'free',
+    adminRole: 'SUP',
+  },
+  {
+    id: 'seed-user-trust-safety',
+    email: 'trust-safety@example.com',
+    identitySubject: 'seed-identity-trust-safety',
+    plan: 'free',
+    adminRole: 'TS',
+  },
+  {
+    id: 'seed-user-billing',
+    email: 'billing@example.com',
+    identitySubject: 'seed-identity-billing',
+    plan: 'free',
+    adminRole: 'BIL',
+  },
+  {
+    id: 'seed-user-engineering',
+    email: 'engineering@example.com',
+    identitySubject: 'seed-identity-engineering',
+    plan: 'free',
+    adminRole: 'ENG',
+  },
+  {
+    id: 'seed-user-admin',
+    email: 'admin@example.com',
+    identitySubject: 'seed-identity-admin',
+    plan: 'free',
+    adminRole: 'ADM',
+  },
+  {
+    id: 'seed-user-auditor',
+    email: 'auditor@example.com',
+    identitySubject: 'seed-identity-auditor',
+    plan: 'free',
+    adminRole: 'AUD',
+  },
+];
 
 const ids = {
   alice: 'seed-user-alice',
   bob: 'seed-user-bob',
-  admin: 'seed-user-admin',
-  adminUser: 'seed-admin-user',
   team: 'seed-team-platform',
   aliceMembership: 'seed-membership-alice',
   bobMembership: 'seed-membership-bob',
@@ -50,63 +126,42 @@ const apiKeyHash = createHash('sha256')
   .digest('hex');
 
 async function main() {
-  await prisma.user.upsert({
-    where: { id: ids.alice },
-    update: {
-      cognitoSubject: 'seed-cognito-alice',
-      plan: 'team',
-    },
-    create: {
-      id: ids.alice,
-      email: 'alice@example.com',
-      passwordHash,
-      cognitoSubject: 'seed-cognito-alice',
-      plan: 'team',
-    },
-  });
+  for (const user of users) {
+    await prisma.user.upsert({
+      where: { id: user.id },
+      update: {
+        email: user.email,
+        plan: user.plan,
+      },
+      create: {
+        id: user.id,
+        email: user.email,
+        passwordHash,
+        identitySubject: user.identitySubject,
+        plan: user.plan,
+      },
+    });
 
-  await prisma.user.upsert({
-    where: { id: ids.bob },
-    update: {
-      cognitoSubject: 'seed-cognito-bob',
-      plan: 'pro',
-    },
-    create: {
-      id: ids.bob,
-      email: 'bob@example.com',
-      passwordHash,
-      cognitoSubject: 'seed-cognito-bob',
-      plan: 'pro',
-    },
-  });
-
-  await prisma.user.upsert({
-    where: { id: ids.admin },
-    update: {
-      cognitoSubject: 'seed-cognito-admin',
-    },
-    create: {
-      id: ids.admin,
-      email: 'admin@example.com',
-      passwordHash,
-      cognitoSubject: 'seed-cognito-admin',
-      plan: 'free',
-    },
-  });
-
-  await prisma.adminUser.upsert({
-    where: { id: ids.adminUser },
-    update: {
-      role: 'ADM',
-      ssoSubject: 'seed-cognito-admin',
-    },
-    create: {
-      id: ids.adminUser,
-      userId: ids.admin,
-      role: 'ADM',
-      ssoSubject: 'seed-cognito-admin',
-    },
-  });
+    if (user.adminRole) {
+      const adminUserId =
+        user.adminRole === 'ADM'
+          ? 'seed-admin-user'
+          : `seed-admin-user-${user.adminRole.toLowerCase()}`;
+      await prisma.adminUser.upsert({
+        where: { id: adminUserId },
+        update: {
+          userId: user.id,
+          role: user.adminRole,
+        },
+        create: {
+          id: adminUserId,
+          userId: user.id,
+          role: user.adminRole,
+          ssoSubject: user.identitySubject,
+        },
+      });
+    }
+  }
 
   await prisma.team.upsert({
     where: { id: ids.team },

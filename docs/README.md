@@ -17,11 +17,15 @@ page routes or UI components.
 
 ## Existing reference documents
 
-| Document                                                | Use it for                                                             |
-| ------------------------------------------------------- | ---------------------------------------------------------------------- |
-| [Authentication and authorization](./authentication.md) | Customer/staff identity, role model, API-key scopes, user access rules |
-| [Infrastructure guide](./infrastructure.md)             | AWS/Terraform deployment and environment configuration                 |
-| [Backend initial flow](./backend-initial-flow.md)       | Historical product/API specification and initial flows                 |
+| Document                                                    | Use it for                                                             |
+| ----------------------------------------------------------- | ---------------------------------------------------------------------- |
+| [Authentication and authorization](./authentication.md)     | Customer/staff identity, role model, API-key scopes, user access rules |
+| [Resend email templates](./email-templates.md)               | Published Resend templates, variables, aliases, and deployment configuration |
+| [Retired AWS infrastructure](./infrastructure.md)           | AWS decommission status and the remaining DNS/state cleanup gates       |
+| [Backend initial flow](./backend-initial-flow.md)           | Historical product/API specification and initial flows                 |
+| [Free-tier migration audit](./free-tier-migration-audit.md) | Existing AWS usage, runtime dependencies, risks, and migration gates   |
+| [Free-tier architecture](./free-tier-architecture.md)       | Target Cloudflare, Vercel, Supabase, R2, and email-provider design     |
+| [Free-tier migration runbook](./free-tier-migration.md)     | Historical migration sequence and current AWS retirement status       |
 
 The current source code and the three feature guides above describe the
 implemented runtime. The initial-flow specification contains both current

@@ -11,7 +11,7 @@ export class BillingReconciliationCronService {
   @Cron(CronExpression.EVERY_30_MINUTES)
   async expirePastDueSubscriptions(): Promise<void> {
     try {
-      await this.billing.reconcilePastDueSubscriptions();
+      await this.runPastDueSubscriptionReconciliation();
     } catch (error) {
       this.logger.error(
         'Past-due subscription processing failed',
@@ -20,15 +20,23 @@ export class BillingReconciliationCronService {
     }
   }
 
+  async runPastDueSubscriptionReconciliation(): Promise<void> {
+    await this.billing.reconcilePastDueSubscriptions();
+  }
+
   @Cron(CronExpression.EVERY_6_HOURS)
   async reconcileProviderBilling(): Promise<void> {
     try {
-      await this.billing.reconcileBilling();
+      await this.runProviderBillingReconciliation();
     } catch (error) {
       this.logger.error(
         'Billing reconciliation failed',
         error instanceof Error ? error.stack : String(error),
       );
     }
+  }
+
+  async runProviderBillingReconciliation(): Promise<void> {
+    await this.billing.reconcileBilling();
   }
 }

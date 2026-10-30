@@ -1,0 +1,8 @@
+model RateLimitBucket {
+  bucketKey  String   @id @map("bucket_key") @db.Char(64)
+  timestamps DateTime[] @default([])
+  lastSeenAt DateTime @default(now()) @map("last_seen_at")
+
+  @@index([lastSeenAt])
+  @@map("rate_limit_buckets")
+}

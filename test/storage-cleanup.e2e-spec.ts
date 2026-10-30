@@ -8,26 +8,41 @@ import { StoragePurgeService } from '../src/storage/storage-purge.service.js';
 
 describe('Storage cleanup and retries (e2e)', () => {
   const secretId = 'expired-secret';
-  const storageRefs = ['secrets/expired-secret/ciphertext', 'secrets/expired-secret/file'];
+  const storageRefs = [
+    'secrets/expired-secret/ciphertext',
+    'secrets/expired-secret/file',
+  ];
   const bucket = 'keydrop-test-bucket';
   let prisma: ReturnType<typeof createPrisma>;
   let send: ReturnType<typeof vi.spyOn>;
   let storagePurge: StoragePurgeService;
   let cleanup: SecretCleanupCronService;
+  let secretRecord: ReturnType<typeof createPrisma>['secretRecord'];
 
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-10-16T00:00:00.000Z'));
     prisma = createPrisma(secretId, storageRefs);
+    secretRecord = prisma.secretRecord;
     send = vi.spyOn(S3Client.prototype, 'send');
     storagePurge = new StoragePurgeService(
       prisma as never,
-      { get: (key: string) => (key === 'S3_REGION' ? 'us-east-1' : bucket) } as never,
+      {
+        get: (key: string) =>
+          key === 'STORAGE_PROVIDER'
+            ? 'r2'
+            : key === 'R2_BUCKET_NAME'
+              ? bucket
+              : key === 'R2_ACCOUNT_ID'
+                ? 'test-account'
+                : key === 'R2_ACCESS_KEY_ID'
+                  ? 'test-access-key'
+                  : key === 'R2_SECRET_ACCESS_KEY'
+                    ? 'test-secret-key'
+                    : undefined,
+      } as never,
     );
-    cleanup = new SecretCleanupCronService(
-      prisma as never,
-      storagePurge,
-    );
+    cleanup = new SecretCleanupCronService(prisma as never, storagePurge);
   });
 
   afterEach(() => {
@@ -35,16 +50,14 @@ describe('Storage cleanup and retries (e2e)', () => {
     vi.useRealTimers();
   });
 
-  it('queues failed purges, backs off failed retries, and records eventual deletion', async () => {
+  it('retries failed storage purges and retains the expired secret record', async () => {
     send.mockResolvedValueOnce({
       Errors: [{ Key: storageRefs[0], Code: 'InternalError' }],
     } as never);
 
     await cleanup.cleanupExpiredSecrets();
 
-    expect(prisma.secret.deleteMany).toHaveBeenCalledWith({
-      where: { id: { in: [secretId] } },
-    });
+    expect(prisma.transaction.secret.updateMany).toHaveBeenCalled();
     expect(send).toHaveBeenCalledTimes(1);
     const bulkCommand = send.mock.calls[0][0];
     expect(bulkCommand).toBeInstanceOf(DeleteObjectsCommand);
@@ -61,7 +74,7 @@ describe('Storage cleanup and retries (e2e)', () => {
         expect.objectContaining({
           secretId,
           attempts: 1,
-          lastError: 'S3 failed to delete 1 storage objects',
+          lastError: 'Object storage failed to delete 1 objects',
           nextRetryAt: new Date('2026-10-16T00:01:00.000Z'),
           deletedAt: null,
         }),
@@ -105,6 +118,14 @@ describe('Storage cleanup and retries (e2e)', () => {
         Key: storageRefs[index],
       });
     }
+    expect(secretRecord).toEqual(
+      expect.objectContaining({
+        status: 'expired',
+        ciphertext: null,
+        ciphertextRef: null,
+      }),
+    );
+    expect(prisma.secret.deleteMany).not.toHaveBeenCalled();
   });
 });
 
@@ -228,11 +249,43 @@ function createPrisma(secretId: string, storageRefs: string[]) {
     ),
   };
 
+  const secretRecord = {
+    status: 'active',
+    ciphertext: 'encrypted-content',
+    ciphertextRef: storageRefs[0],
+  };
+  const tx = {
+    secret: {
+      updateMany: vi.fn(
+        async ({
+          where,
+          data,
+        }: {
+          where: { status?: { in: string[] } };
+          data: Record<string, unknown>;
+        }) => {
+          if (where.status?.in.includes(secretRecord.status)) {
+            Object.assign(secretRecord, data);
+            return { count: 1 };
+          }
+          Object.assign(secretRecord, data);
+          return { count: 1 };
+        },
+      ),
+    },
+    auditEvent: { create: vi.fn().mockResolvedValue({}) },
+    file: { deleteMany: vi.fn().mockResolvedValue({ count: 1 }) },
+  };
   return {
     deletions,
     storageDeletion,
-    $transaction: vi.fn((operations: Promise<unknown>[]) =>
-      Promise.all(operations),
+    secretRecord,
+    transaction: tx,
+    $transaction: vi.fn(
+      (
+        action:
+          Promise<unknown>[] | ((transaction: unknown) => Promise<unknown>),
+      ) => (Array.isArray(action) ? Promise.all(action) : action(tx)),
     ),
     secret: {
       findMany: vi.fn().mockResolvedValue([
@@ -242,6 +295,10 @@ function createPrisma(secretId: string, storageRefs: string[]) {
           files: [{ storageRef: storageRefs[1] }],
         },
       ]),
+      updateMany: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
+        Object.assign(secretRecord, data);
+        return { count: 1 };
+      }),
       deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
   };

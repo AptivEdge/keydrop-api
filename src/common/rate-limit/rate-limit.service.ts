@@ -1,26 +1,28 @@
-import { Injectable, OnModuleDestroy } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  ServiceUnavailableException,
+} from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { createHmac } from 'node:crypto';
+import { PrismaService } from '../../prisma/prisma.service.js';
+import type { RateLimitPolicy } from './rate-limit.decorator.js';
 
 export interface RateLimitResult {
   allowed: boolean;
   retryAfterSeconds: number;
 }
 
-interface Bucket {
-  timestamps: number[];
-  lastSeenAt: number;
-}
-
-const POLICIES: Record<
-  import('./rate-limit.decorator.js').RateLimitPolicy,
-  { limit: number; windowMs: number }
-> = {
+const POLICIES: Record<RateLimitPolicy, { limit: number; windowMs: number }> = {
   secret_create: { limit: 20, windowMs: 60 * 60 * 1000 },
   secret_reveal: { limit: 30, windowMs: 10 * 60 * 1000 },
   secret_report: { limit: 10, windowMs: 60 * 60 * 1000 },
   team_invitation: { limit: 20, windowMs: 60 * 60 * 1000 },
   api_key_request: { limit: 10, windowMs: 60 * 60 * 1000 },
   checkout: { limit: 10, windowMs: 60 * 60 * 1000 },
-  auth_signup: { limit: 5, windowMs: 60 * 60 * 1000 },
+  auth_signup: { limit: 10, windowMs: 60 * 60 * 1000 },
+  admin_bootstrap: { limit: 3, windowMs: 60 * 60 * 1000 },
+  admin_account_create: { limit: 10, windowMs: 60 * 60 * 1000 },
   auth_login: { limit: 10, windowMs: 15 * 60 * 1000 },
   auth_refresh: { limit: 30, windowMs: 60 * 60 * 1000 },
   otp_issue: { limit: 5, windowMs: 60 * 60 * 1000 },
@@ -28,66 +30,110 @@ const POLICIES: Record<
   password_reset: { limit: 5, windowMs: 60 * 60 * 1000 },
   recipient_access: { limit: 5, windowMs: 60 * 60 * 1000 },
   anonymous_secret_create: { limit: 3, windowMs: 60 * 60 * 1000 },
+  request_create: { limit: 20, windowMs: 60 * 60 * 1000 },
+  request_respond: { limit: 10, windowMs: 60 * 60 * 1000 },
 };
 
+const MAX_WINDOW_MS = Math.max(
+  ...Object.values(POLICIES).map(({ windowMs }) => windowMs),
+);
+
 @Injectable()
-export class RateLimitService implements OnModuleDestroy {
-  private readonly buckets = new Map<string, Bucket>();
-  private readonly cleanupTimer = setInterval(
-    () => this.cleanup(),
-    10 * 60 * 1000,
-  );
+export class RateLimitService {
+  private readonly logger = new Logger(RateLimitService.name);
 
-  consume(
-    policy: import('./rate-limit.decorator.js').RateLimitPolicy,
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly config: ConfigService,
+  ) {}
+
+  async consume(
+    policy: RateLimitPolicy,
     key: string,
-  ): RateLimitResult {
-    const config = POLICIES[policy];
-    const now = Date.now();
-    const bucketKey = `${policy}:${key}`;
-    const bucket = this.buckets.get(bucketKey) ?? {
-      timestamps: [],
-      lastSeenAt: now,
-    };
-    const cutoff = now - config.windowMs;
-    bucket.timestamps = bucket.timestamps.filter(
-      (timestamp) => timestamp > cutoff,
+  ): Promise<RateLimitResult> {
+    const policyConfig = POLICIES[policy];
+    const bucketKey = this.hashBucketKey(policy, key);
+    return this.prisma.$transaction(
+      async (transaction) => {
+        await transaction.$queryRaw`
+          SELECT pg_advisory_xact_lock(
+            hashtextextended(${bucketKey}, 0)
+          )::text AS locked
+        `;
+        const now = new Date();
+        const cutoff = new Date(now.getTime() - policyConfig.windowMs);
+        const bucket = await transaction.rateLimitBucket.findUnique({
+          where: { bucketKey },
+          select: { timestamps: true },
+        });
+        const timestamps = (bucket?.timestamps ?? [])
+          .filter((timestamp) => timestamp > cutoff)
+          .sort((left, right) => left.getTime() - right.getTime());
+        const allowed = timestamps.length < policyConfig.limit;
+        const retryAfterSeconds = allowed
+          ? 0
+          : Math.max(
+              1,
+              Math.ceil(
+                (timestamps[0].getTime() +
+                  policyConfig.windowMs -
+                  now.getTime()) /
+                  1000,
+              ),
+            );
+
+        await transaction.rateLimitBucket.upsert({
+          where: { bucketKey },
+          create: {
+            bucketKey,
+            timestamps: allowed ? [...timestamps, now] : timestamps,
+            lastSeenAt: now,
+          },
+          update: {
+            timestamps: allowed ? [...timestamps, now] : timestamps,
+            lastSeenAt: now,
+          },
+        });
+
+        return { allowed, retryAfterSeconds };
+      },
+      { maxWait: 2_000, timeout: 5_000 },
     );
-    bucket.lastSeenAt = now;
-
-    if (bucket.timestamps.length >= config.limit) {
-      const retryAfterSeconds = Math.max(
-        1,
-        Math.ceil((bucket.timestamps[0] + config.windowMs - now) / 1000),
-      );
-      this.buckets.set(bucketKey, bucket);
-      return { allowed: false, retryAfterSeconds };
-    }
-
-    bucket.timestamps.push(now);
-    this.buckets.set(bucketKey, bucket);
-    return { allowed: true, retryAfterSeconds: 0 };
   }
 
-  onModuleDestroy(): void {
-    clearInterval(this.cleanupTimer);
-    this.buckets.clear();
+  async cleanupExpiredBuckets(): Promise<number> {
+    const cutoff = new Date(Date.now() - MAX_WINDOW_MS);
+    const staleBuckets = await this.prisma.rateLimitBucket.findMany({
+      where: { lastSeenAt: { lt: cutoff } },
+      select: { bucketKey: true },
+      take: 500,
+      orderBy: { lastSeenAt: 'asc' },
+    });
+    if (staleBuckets.length === 0) return 0;
+
+    const result = await this.prisma.rateLimitBucket.deleteMany({
+      where: {
+        bucketKey: { in: staleBuckets.map(({ bucketKey }) => bucketKey) },
+        lastSeenAt: { lt: cutoff },
+      },
+    });
+    return result.count;
   }
 
-  private cleanup(): void {
-    const now = Date.now();
-    for (const [key, bucket] of this.buckets) {
-      const policy = key.slice(0, key.indexOf(':')) as keyof typeof POLICIES;
-      const cutoff = now - POLICIES[policy].windowMs;
-      bucket.timestamps = bucket.timestamps.filter(
-        (timestamp) => timestamp > cutoff,
+  private hashBucketKey(policy: RateLimitPolicy, key: string): string {
+    const pepper = this.config.get<string>('SECRET_AUTH_PEPPER');
+    if (!pepper) {
+      this.logger.error(
+        JSON.stringify({
+          event: 'rate_limit_configuration_failure',
+          reason: 'missing_secret_auth_pepper',
+        }),
       );
-      if (
-        !bucket.timestamps.length &&
-        now - bucket.lastSeenAt > POLICIES[policy].windowMs
-      ) {
-        this.buckets.delete(key);
-      }
+      throw new ServiceUnavailableException('Rate limiting is not configured');
     }
+
+    return createHmac('sha256', pepper)
+      .update(`${policy}:${key}`)
+      .digest('hex');
   }
 }

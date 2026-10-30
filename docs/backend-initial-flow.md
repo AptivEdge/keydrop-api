@@ -1,5 +1,9 @@
 # Keydrop — Backend Specification
 
+> Historical design notes. Anonymous secret creation and Free-plan secret
+> creation described below are retired. Current creation requires an
+> authenticated Pro or Team plan; see `frontend-features.md`.
+
 Source of truth · v1.0 draft · October 15, 2026 · Owner: Product and Engineering
 
 ## 1. Purpose and how to use this document
@@ -33,11 +37,11 @@ current Keydrop API follows the implementation in this repository instead:
 - SES also delivers team invitations and failed-payment notifications.
   Razorpay checkout, verified webhook processing, cycle-end plan changes,
   seven-day dunning, and provider reconciliation are implemented.
-- DynamoDB, SQS, Slack OAuth, and the worker service are not implemented and
+- DynamoDB, SQS, and the worker service are not implemented and
   must not be treated as available APIs or infrastructure.
 
-Where older sections below mention DynamoDB, first-party password sessions,
-Slack integrations, or SQS worker queues, those are planned work and not the
+References to DynamoDB, first-party password sessions, non-email notification
+providers, or SQS worker queues in older sections are planned work, not the
 current runtime contract. New implementation work must update this section and
 the relevant API/schema sections in the same change.
 
@@ -81,7 +85,7 @@ The platform is JavaScript and TypeScript end to end, runs entirely on AWS, and 
 
 **Deployables (ECS services):** `web` (Next.js: public site and recipient pages), `api` (NestJS REST API), `worker` (NestJS SQS consumers and scheduled tasks) and `admin` (separate app, domain and IAM role; see the Admin spec). Each has its own container image, task role and autoscaling policy.
 
-Request path: Browser → CloudFront with WAF → Application Load Balancer → ECS services (web, api) → RDS PostgreSQL, DynamoDB and S3. The worker consumes SQS queues and talks to RDS, DynamoDB, SES, Razorpay and Slack. EventBridge Scheduler sends the periodic jobs in Section 12 to SQS.
+Request path: Browser → CloudFront with WAF → Application Load Balancer → ECS services (web, api) → RDS PostgreSQL, DynamoDB and S3. The worker consumes SQS queues and talks to RDS, DynamoDB, SES and Razorpay. EventBridge Scheduler sends the periodic jobs in Section 12 to SQS.
 
 ### 3.1 Local development
 
@@ -112,7 +116,7 @@ Cross-store references use ids only (`owner_id` in DynamoDB is `users.id`). Ther
 ### 3.3 AWS accounts, network and security
 
 - **Accounts:** separate AWS accounts for dev, staging and production, plus a tooling account for ECR and Terraform state, under AWS Organizations.
-- **Network:** a VPC across two Availability Zones. Public subnets for the load balancer; private subnets for ECS and RDS. Gateway endpoints for S3 and DynamoDB, interface endpoints for SQS, Secrets Manager, KMS and CloudWatch Logs, and NAT for outbound calls to Razorpay, Slack and OAuth providers.
+- **Network:** a VPC across two Availability Zones. Public subnets for the load balancer; private subnets for ECS and RDS. Gateway endpoints for S3 and DynamoDB, interface endpoints for SQS, Secrets Manager, KMS and CloudWatch Logs, and NAT for outbound calls to Razorpay and OAuth providers.
 - **Encryption:** customer-managed KMS keys for RDS, DynamoDB, S3, SQS, Secrets Manager and logs. TLS everywhere.
 - **IAM:** one task role per service with least privilege. The `admin` role reads DynamoDB metadata only: a `dynamodb:LeadingKeys` condition denies keys that start with `C#` (secret material).
 - **Backups:** RDS automated backups with point-in-time recovery (7 days); DynamoDB point-in-time recovery on, 7 day window.
@@ -132,7 +136,7 @@ Cross-store references use ids only (`owner_id` in DynamoDB is `users.id`). Ther
 
 - **Product:** Razorpay Subscriptions with Standard Checkout and webhooks. Plans (Pro and Team, monthly and yearly) are created in Razorpay and mirrored in `plan_limits` with their plan ids. Team seats use the subscription quantity.
 - **Currency:** Subscription plans and checkout currently support INR only. International-currency plans are not configured; see D13.
-- **Flow:** `POST /billing/checkout` creates a subscription (status `created`) and returns its id. The browser opens Checkout. After payment the browser posts the signature to `POST /billing/verify`, but **the webhook is the source of truth** for any plan change.
+- **Flow:** `POST /billing/checkout` creates a subscription and returns its id. The browser opens Checkout. After payment, the browser posts the signature to `POST /billing/verify`; the API verifies it and fetches the subscription from Razorpay, activating the plan immediately when Razorpay reports it as active. `POST /me/billing/refresh` lets an authenticated owner retry provider synchronization without creating another payment.
 - **Webhook:** `POST /webhooks/razorpay` verifies the `X-Razorpay-Signature` header against the raw body with the webhook secret, rejects the event when verification fails, stores the event id for idempotency, and handles `subscription.authenticated`, `subscription.activated`, `subscription.charged`, `subscription.pending`, `subscription.halted`, `subscription.updated`, `subscription.cancelled`, `subscription.completed` and `payment.failed`.
 - **Status mapping:**
 
@@ -342,8 +346,7 @@ Rules: dashboard queries read metadata items only, never material items. Label s
 | `team_invites`       | id, team\_id, email, role, status, expires\_at                                                                                                                                        |
 | `team_policies`      | team\_id, max\_expiry\_hours, require\_passphrase, blocked\_domains                                                                                                                   |
 | `api_keys`           | id, user\_id, name, key\_hash, last\_used\_at, revoked\_at                                                                                                                            |
-| `integrations`       | user\_id or team\_id, kind (slack), token\_enc, channel                                                                                                                               |
-| `notification_prefs` | user\_id, trigger, email, slack, in\_app                                                                                                                                              |
+| `notification_prefs` | user\_id, trigger, email, in\_app                                                                                                                                                     |
 | `subscriptions`      | id, owner (user or team), razorpay\_customer\_id, razorpay\_subscription\_id, razorpay\_plan\_id, plan, status, quantity, current\_period\_end, cancel\_at\_period\_end, grace\_until |
 | `payments`           | id, subscription\_id, razorpay\_payment\_id, razorpay\_invoice\_id, amount, currency, status, created\_at                                                                             |
 | `webhook_events`     | event\_id (unique), provider, type, received\_at, processed\_at                                                                                                                       |
@@ -401,7 +404,6 @@ PostgreSQL indexes: `users (email)` unique, `team_members (user_id)`, `subscript
 | GET `/me/audit`, GET `/me/audit/export`                                                      | Pro (export Pro)         | Account-wide event log                        |
 | GET and POST `/me/api-keys`, DELETE `/me/api-keys/{id}`                                      | Pro                      | Key is shown once                             |
 | GET and PATCH `/me/notifications`                                                            | Free                     | Preferences                                   |
-| POST `/me/integrations/slack/connect`, DELETE `.../slack`                                    | Pro                      | Slack                                         |
 | GET and POST `/teams`, members, invites, policies, branding, domain                          | Team                     | Workspace management                          |
 | GET `/billing`, POST `/billing/checkout`, POST `/billing/verify, POST /billing/subscription` | Free                     | Plan management                               |
 | POST `/webhooks/razorpay`                                                                    | Signature                | Billing events                                |
@@ -529,15 +531,16 @@ Billing routes currently backed by PostgreSQL:
 | `DELETE` | `/api/v1/me/billing/subscriptions/:id`             | Subscription owner                         |
 | `POST`   | `/api/v1/me/billing/subscriptions/:id/change-plan` | Subscription owner; effective at cycle end |
 | `POST`   | `/api/v1/me/billing/checkout`                      | Authenticated user                         |
-| `POST`   | `/api/v1/me/billing/verify`                        | Authenticated subscription owner           |
+| `POST`   | `/api/v1/me/billing/verify`                        | Authenticated subscription owner; verifies and synchronizes |
+| `POST`   | `/api/v1/me/billing/refresh`                       | Authenticated user; refreshes provider status |
 | `POST`   | `/api/v1/webhooks/razorpay`                        | Razorpay signature                         |
 | `POST`   | `/api/v1/admin/billing/refunds`                    | BIL or ADM staff role; written reason      |
 
 Subscription cancellation changes the local subscription status to `canceled`.
-Razorpay is the configured payment provider. Checkout and browser signature
-verification are available, but the browser response never changes a plan.
-Only a verified `POST /api/v1/webhooks/razorpay` event can synchronize the
-subscription and user plan. Webhook event ids are persisted for idempotency.
+Razorpay is the configured payment provider. Browser input alone never changes
+a plan: the API validates the checkout signature and confirms active status by
+fetching the subscription from Razorpay. Signed webhook event ids are also
+persisted for idempotency, and scheduled reconciliation remains a fallback.
 Configure `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`,
 `RAZORPAY_WEBHOOK_SECRET`, and the four INR plan IDs in `.env`.
 
@@ -576,7 +579,7 @@ and only become the local entitlement after a charge confirms the new plan.
 
 ### 7.3 Create secret: request fields
 
-`ciphertext`, `iv`, `kdf` (algorithm, salt, parameters), `auth` (only with passphrase), `expires_in` (seconds, validated against plan), `max_views`, `label` (account only), `recipient_email` (Pro), `notify_email`, `notify_slack` (Pro), `file_ids` (Pro). The response returns `id`, `expires_at`, `max_views` and the dashboard status. The server never returns the link, because it does not know the key.
+`ciphertext`, `iv`, `kdf` (algorithm, salt, parameters), `auth` (only with passphrase), `expires_in` (seconds, validated against plan), `max_views`, `label` (account only), `recipient_email` (Pro), `notify_email`, `file_ids` (Pro). The response returns `id`, `expires_at`, `max_views` and the dashboard status. The server never returns the link, because it does not know the key.
 
 ### 7.4 Error codes
 
@@ -609,7 +612,6 @@ Entitlements are enforced on the server and returned by `GET /me/entitlements`. 
 | Passphrase                       | No                       | Yes             | Yes                   | Yes                  |
 | Email when opened                | No                       | Yes             | Yes                   | Yes                  |
 | Recipient email lock             | No                       | No              | Yes                   | Yes                  |
-| Slack notifications              | No                       | No              | Yes                   | Yes                  |
 | File sharing                     | No                       | No              | 25 MB                 | 100 MB               |
 | Dashboard history                | None                     | 30 days         | 1 year                | 2 years              |
 | Activity detail                  | None                     | Timestamps only | Full (region, device) | Full                 |
@@ -642,21 +644,21 @@ Abuse handling:
 
 ## 10. Notifications and integrations
 
-| Trigger                         | Email | Slack    | In-app |
-| ------------------------------- | ----- | -------- | ------ |
-| `revealed`                      | Yes   | Yes      | Yes    |
-| First `passphrase_failed`       | Yes   | Yes      | Yes    |
-| `locked`                        | Yes   | Yes      | Yes    |
-| Expired without a reveal        | Yes   | Optional | Yes    |
-| Request fulfilled               | Yes   | Yes      | Yes    |
-| Payment failed, plan limit near | Yes   | No       | Banner |
+| Trigger                         | Email | In-app |
+| ------------------------------- | ----- | ------ |
+| `revealed`                      | Yes   | Yes    |
+| First `passphrase_failed`       | Yes   | Yes    |
+| `locked`                        | Yes   | Yes    |
+| Expired without a reveal        | Yes   | Yes    |
+| Request fulfilled               | Yes   | Yes    |
+| Payment failed, plan limit near | Yes   | Banner |
 
 Rules: notifications never contain secret content, passphrases or links; secret
 labels are limited to the owner's in-app notification. The current runtime
 supports in-app preferences and opted-in email for notification categories.
 Expiring-secret notices are deduplicated and generated by a scheduled job;
 pending notification emails are retried by the scheduled dispatcher. SQS,
-five-retry exponential backoff, and Slack OAuth remain planned work.
+five-retry exponential backoff remain planned work.
 
 ## 11. Audit and retention
 
@@ -678,7 +680,7 @@ five-retry exponential backoff, and Slack OAuth remain planned work.
 | Job                       | Schedule             | Purpose                                     |
 | ------------------------- | -------------------- | ------------------------------------------- |
 | `expire_sweeper`          | Every minute         | Mark expired secrets, run terminal cleanup  |
-| `notification_dispatcher` | Continuous           | Send email, Slack and in-app events         |
+| `notification_dispatcher` | Continuous           | Send email and in-app events                |
 | `orphan_upload_cleanup`   | Hourly               | Delete uploads pending for more than 1 hour |
 | `retention_purge`         | Daily                | Remove rows past retention                  |
 | `razorpay_sync`           | Webhook plus nightly | Reconcile subscriptions                     |

@@ -11,20 +11,24 @@ export class EmailOtpCleanupCronService {
   @Cron(CronExpression.EVERY_HOUR)
   async cleanupExpiredOtps(): Promise<void> {
     try {
-      const result = await this.prisma.emailOtp.deleteMany({
-        where: {
-          OR: [
-            { expiresAt: { lt: new Date() } },
-            { createdAt: { lt: new Date(Date.now() - 24 * 60 * 60 * 1000) } },
-          ],
-        },
-      });
-      this.logger.log(`Cleaned up ${result.count} expired email OTP records`);
+      await this.runExpiredOtpCleanup();
     } catch (error: unknown) {
       this.logger.error(
         'Email OTP cleanup failed',
         error instanceof Error ? error.stack : String(error),
       );
     }
+  }
+
+  async runExpiredOtpCleanup(): Promise<void> {
+    const result = await this.prisma.emailOtp.deleteMany({
+      where: {
+        OR: [
+          { expiresAt: { lt: new Date() } },
+          { createdAt: { lt: new Date(Date.now() - 24 * 60 * 60 * 1000) } },
+        ],
+      },
+    });
+    this.logger.log(`Cleaned up ${result.count} expired email OTP records`);
   }
 }

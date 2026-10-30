@@ -2,28 +2,38 @@ model User {
   id                      String    @id @default(cuid())
   email                   String    @unique
   passwordHash            String
-  cognitoSubject          String?   @unique
+  identitySubject         String?   @unique
   plan                    UserPlan  @default(free)
   emailVerifiedAt         DateTime?
   notificationPreferences Json      @default("{}")
+  suspendedAt             DateTime?
+  suspensionReason        String?
   deletedAt               DateTime?
   createdAt               DateTime  @default(now())
   updatedAt               DateTime  @updatedAt
 
   adminUser           AdminUser?
-  createdTeams        Team[]           @relation("TeamCreator")
+  createdTeams        Team[]              @relation("TeamCreator")
   teamMembers         TeamMember[]
   secrets             Secret[]
-  auditEvents         AuditEvent[]     @relation("AuditActor")
+  auditEvents         AuditEvent[]        @relation("AuditActor")
+  adminAuditEvents    AdminAuditLog[]     @relation("AdminAuditActor")
+  requestedApprovals  AdminApproval[]     @relation("ApprovalRequester")
+  reviewedApprovals   AdminApproval[]     @relation("ApprovalReviewer")
+  dataRequests        AdminDataRequest[]  @relation("DataRequestSubject")
+  createdDataRequests AdminDataRequest[]  @relation("DataRequestCreator")
+  createdBlocklistEntries AdminBlocklistEntry[] @relation("BlocklistCreator")
   notifications       Notification[]
   apiKeys             ApiKey[]
   subscriptions       Subscription[]
   invoices            Invoice[]
   billingRefunds      BillingRefund[]
-  policies            Policy[]         @relation("UserPolicies")
-  abuseReports        AbuseReport[]    @relation("ReportReporter")
+  createdBillingPlans BillingPlan[]       @relation("BillingPlanCreator")
+  policies            Policy[]            @relation("UserPolicies")
+  abuseReports        AbuseReport[]       @relation("ReportReporter")
   emailOtps           EmailOtp[]
-  sentTeamInvitations TeamInvitation[] @relation("TeamInvitationInviter")
+  sentTeamInvitations TeamInvitation[]    @relation("TeamInvitationInviter")
+  secretRequestLinks  SecretRequestLink[]
 
   @@index([createdAt])
 }

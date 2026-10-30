@@ -21,15 +21,24 @@ enum TeamRole {
 
 enum SecretStatus {
   active
+  partially_viewed
   viewed
   expired
   revoked
+  locked
 }
 
 enum RequestStatus {
   pending
   approved
   denied
+}
+
+enum RequestLinkStatus {
+  pending
+  fulfilled
+  cancelled
+  expired
 }
 
 enum NotificationType {
@@ -80,6 +89,13 @@ enum AbuseReportStatus {
   dismissed
 }
 
+enum EmailOtpPurpose {
+  recipient_access
+  email_verification
+  email_verification_link
+  password_reset
+}
+
 enum AuditEventType {
   secret_created
   secret_viewed
@@ -89,9 +105,14 @@ enum AuditEventType {
   access_granted
   access_denied
   passphrase_failed
+  locked
+  email_code_sent
+  email_verified
+  email_code_failed
   api_key_created
   api_key_revoked
   policy_updated
   abuse_reported
   billing_refunded
+  secret_link_recovered
 }

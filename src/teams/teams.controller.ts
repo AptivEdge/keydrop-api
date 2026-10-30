@@ -9,7 +9,7 @@ import {
   Query,
 } from '@nestjs/common';
 import { CurrentUser } from '../common/auth/decorators/current-user.decorator.js';
-import type { AuthenticatedUser } from '../common/auth/guards/cognito-auth.guard.js';
+import type { AuthenticatedUser } from '../common/auth/guards/supabase-auth.guard.js';
 import { CursorPaginationDto } from '../common/dto/cursor-pagination.dto.js';
 import { RequireApiKeyScope } from '../common/auth/api-key-scopes.js';
 import { TeamsService } from './teams.service.js';
@@ -30,7 +30,7 @@ import {
 } from '@nestjs/swagger';
 
 @ApiTags('Teams')
-@ApiBearerAuth('cognito')
+@ApiBearerAuth('supabase')
 @Controller('teams')
 export class TeamsController {
   constructor(private readonly teams: TeamsService) {}

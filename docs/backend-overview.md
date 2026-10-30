@@ -29,15 +29,16 @@ The request path is, at a high level:
    unknown body properties are rejected, and known fields are transformed and
    validated.
 4. Controllers delegate feature behavior to services.
-5. Prisma persists relational records in PostgreSQL; AWS/provider integrations
-   handle identity, encrypted object storage, email, and billing as applicable.
+5. Prisma persists relational records in PostgreSQL; Supabase Auth, Cloudflare
+   R2, the email provider, and Razorpay handle identity, encrypted object
+   storage, transactional email, and billing.
 6. A global exception filter returns API errors and logs failures.
 
 ## 2. Feature modules
 
 | Module              | Responsibility                                                                                     |
 | ------------------- | -------------------------------------------------------------------------------------------------- |
-| `common/auth`       | Cognito user/staff authentication, API-key auth, role checks, email/password operations            |
+| `common/auth`       | Supabase Auth, API-key authentication, role checks, and email/password operations                  |
 | `common/rate-limit` | Endpoint-specific request throttling                                                               |
 | `secrets`           | Secret lifecycle, public recipient access, passphrase validation, abuse reports, uploads/downloads |
 | `account`           | User entitlements, secret history, audit, API keys, notifications, export, account deletion        |
@@ -45,8 +46,8 @@ The request path is, at a high level:
 | `teams`             | Customer team membership, invitations, and policies                                                |
 | `billing`           | Razorpay checkout, customer subscriptions/invoices/refunds, staff refunds, webhook processing      |
 | `cron-jobs`         | Expiry cleanup, retention cleanup, notifications, OTP cleanup, billing reconciliation              |
-| `storage`           | S3 object deletion and retry handling                                                              |
-| `logger`            | HTTP/error logging and CloudWatch integration                                                      |
+| `storage`           | R2 object deletion and retry handling                                                              |
+| `logger`            | HTTP/error logging to standard NestJS output                                                       |
 
 The full HTTP route catalogue is in the [frontend guide](./frontend-features.md)
 and staff route listing in the [admin guide](./admin-features.md).
@@ -57,18 +58,19 @@ and staff route listing in the [admin guide](./admin-features.md).
   secrets and metadata, file references, teams, invitations, policies, API
   keys, notifications, audit events, abuse reports, OTP tracking, subscriptions,
   invoices, refunds, and billing webhook events.
-- **Amazon Cognito** authenticates customers and staff using separate pools.
-  The validated Cognito subject is linked to a local `User`; staff authorization
-  comes from the linked `AdminUser.role`.
-- **Amazon S3** stores encrypted secret/file objects. The API persists object
-  references and encryption metadata and issues short-lived presigned URLs for
-  file operations.
-- **Amazon SES** delivers emails, including team invitations and notification/
-  billing messages.
+- **Supabase Auth** authenticates customers and staff. The validated JWT
+  subject is linked to a local `User`; staff authorization comes from the
+  linked `AdminUser.role`.
+- **Cloudflare R2** stores encrypted secret/file objects. The API persists
+  object references and encryption metadata and issues short-lived presigned
+  URLs for file operations.
+- **Resend** delivers application emails, including recipient verification,
+  team invitations, and notifications.
 - **Razorpay** provides subscription checkout and refund processing. Checkout
   signature verification is followed by signed webhook processing and
   reconciliation before subscription state is considered provider-confirmed.
-- **CloudWatch/Winston** provide application logging in deployed environments.
+- **Vercel Runtime Logs** capture NestJS standard output and errors. Persistent
+  business/security audit events remain in PostgreSQL.
 
 The API does not have access to plaintext shared-secret content or the
 client-held decryption key. The browser/client encrypts and decrypts the
@@ -77,7 +79,9 @@ references.
 
 ## 4. Background work
 
-Nest scheduled jobs run in the API process. Current schedules include:
+Local and non-serverless deployments run Nest scheduled jobs in the API
+process. The same job handlers are exposed to Supabase Cron on Vercel. Current
+schedules include:
 
 | Work                     | Schedule                           | Result                                                                      |
 | ------------------------ | ---------------------------------- | --------------------------------------------------------------------------- |
@@ -88,24 +92,30 @@ Nest scheduled jobs run in the API process. Current schedules include:
 | Notification processing  | Every 5 and 10 minutes             | Creates expiring-secret notifications and delivers opted-in emails          |
 | Billing reconciliation   | Every 30 minutes and every 6 hours | Reconciles provider subscription state and billing reliability workflows    |
 
-Jobs use PostgreSQL and the relevant AWS/provider services directly. The
-current runtime does not depend on SQS or a separate worker service.
+Jobs use PostgreSQL and the relevant target providers directly. Vercel disables
+in-process schedules and exposes protected internal-job endpoints for Supabase
+Cron; local and non-serverless runtimes use NestJS scheduling. The runtime does
+not depend on SQS or a separate worker service.
 
 ## 5. Cross-cutting API behavior
 
 - Base path: `/api/v1`; service probe: `GET /health`.
-- Public endpoints include authentication, anonymous secret creation,
+- Public endpoints include authentication and recipient secret access,
   recipient metadata/reveal/access, abuse-report submission, Razorpay webhook,
   and health/welcome routes. Review the controller route tables for the exact
   distinction between public and protected actions.
-- Customer JWTs and staff JWTs are validated against their respective Cognito
-  pools. API keys are hashed in storage and validated for current plan,
+- Customer and staff JWTs are validated against Supabase Auth. The API resolves
+  the identity subject to a local user and loads database-backed roles. API
+  keys are hashed in storage and validated for current plan,
   revocation, expiry, and route scope.
 - The app rejects non-whitelisted request properties and transforms DTO input.
 - Cursors are used for long histories and list endpoints. API errors are
   surfaced using Nest HTTP exceptions rather than success-shaped empty values.
-- Secret reveal consumes a view. Metadata GET does not. Terminal or expired
-  secrets cannot be revealed.
+- Recipient secret reveal consumes a view. Owner dashboard reveal returns
+  encrypted content without consuming a recipient view, and link recovery is
+  owner-only with a three-recovery limit before locking the secret.
+- Metadata GET does not consume a view. Terminal or expired secrets cannot be
+  revealed or recovered.
 - Rate limits protect sensitive operations such as account creation, login,
   OTP, checkout, secret operations, API-key creation, and team invitations.
 

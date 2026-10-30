@@ -1,0 +1,9 @@
+{
+  "buildCommand": "npm run build",
+  "functions": {
+    "api/[...path].ts": {
+      "includeFiles": "dist/**",
+      "maxDuration": 30
+    }
+  }
+}

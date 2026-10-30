@@ -8,7 +8,10 @@ describe('TeamsService authorization', () => {
   function createService(membershipRole: 'owner' | 'admin' | 'member') {
     const prisma = {
       teamMember: {
-        findUnique: vi.fn().mockResolvedValue({ role: membershipRole }),
+        findUnique: vi.fn().mockResolvedValue({
+          role: membershipRole,
+          team: { suspendedAt: null },
+        }),
         findFirst: vi.fn(),
         update: vi.fn(),
         delete: vi.fn(),

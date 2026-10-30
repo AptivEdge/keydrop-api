@@ -91,7 +91,7 @@ describe('NotificationsCronService', () => {
     const email = {
       sendNotificationEmail: vi
         .fn()
-        .mockRejectedValue(new Error('SES unavailable')),
+        .mockRejectedValue(new Error('Email provider unavailable')),
     };
     const service = new NotificationsCronService(
       prisma as never,

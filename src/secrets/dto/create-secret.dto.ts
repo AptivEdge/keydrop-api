@@ -1,44 +1,67 @@
 import {
+  IsEmail,
+  IsIn,
   IsInt,
-  IsISO8601,
+  IsObject,
   IsOptional,
   IsString,
   Max,
   MaxLength,
   Min,
+  ValidateNested,
 } from 'class-validator';
+import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+
+class KdfDto {
+  @ApiProperty({ enum: ['HKDF-SHA-256', 'Argon2id'] })
+  @IsIn(['HKDF-SHA-256', 'Argon2id'])
+  algorithm!: 'HKDF-SHA-256' | 'Argon2id';
+
+  @ApiPropertyOptional({ maxLength: 128 })
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  salt?: string;
+
+  @ApiPropertyOptional({
+    type: 'object',
+    additionalProperties: { type: 'number' },
+    example: { m: 65536, t: 3, p: 1 },
+  })
+  @IsOptional()
+  @IsObject()
+  parameters?: Record<string, number>;
+}
 
 export class CreateSecretDto {
   @ApiProperty({
     minLength: 1,
-    maxLength: 65536,
-    description: 'Encrypted secret storage reference.',
+    maxLength: 350000,
+    description: 'Base64url-encoded ciphertext produced by the client.',
   })
   @IsString()
-  @MaxLength(65536)
-  ciphertextRef!: string;
+  @MaxLength(350000)
+  ciphertext!: string;
 
-  @ApiProperty({ minLength: 1, maxLength: 512 })
+  @ApiProperty({ minLength: 1, maxLength: 64 })
   @IsString()
-  @MaxLength(512)
+  @MaxLength(64)
   iv!: string;
 
-  @ApiProperty({ minLength: 1, maxLength: 65536 })
-  @IsString()
-  @MaxLength(65536)
-  wrappedKey!: string;
+  @ApiProperty({ type: KdfDto })
+  @ValidateNested()
+  @Type(() => KdfDto)
+  kdf!: KdfDto;
 
-  @ApiProperty({ minLength: 1, maxLength: 512 })
-  @IsString()
-  @MaxLength(512)
-  salt!: string;
-
-  @ApiPropertyOptional({ maxLength: 512 })
+  @ApiPropertyOptional({
+    maxLength: 128,
+    description: 'Client-derived auth value; the passphrase is never sent.',
+  })
   @IsOptional()
   @IsString()
-  @MaxLength(512)
-  authHash?: string;
+  @MaxLength(128)
+  auth?: string;
 
   @ApiPropertyOptional({ maxLength: 200 })
   @IsOptional()
@@ -50,26 +73,28 @@ export class CreateSecretDto {
     minimum: 1,
     maximum: 100,
     type: 'integer',
-    description:
-      'Maximum views are additionally limited by the account plan (3 for anonymous secrets).',
+    description: 'Maximum views are enforced by the account plan.',
   })
   @IsOptional()
   @IsInt()
   @Min(1)
-  @Max(1000)
-  maxViews?: number;
+  @Max(100)
+  max_views?: number;
 
-  @ApiPropertyOptional({ format: 'date-time' })
-  @IsOptional()
-  @IsISO8601()
-  expiresAt?: string;
-
-  @ApiPropertyOptional({
-    maxLength: 512,
-    description: 'Hashed recipient email used to restrict access.',
+  @ApiProperty({
+    type: 'integer',
+    minimum: 60,
+    maximum: 2592000,
+    description: 'Expiry duration in seconds; enforced by the account plan.',
   })
+  @IsInt()
+  @Min(60)
+  @Max(2592000)
+  expires_in!: number;
+
+  @ApiPropertyOptional({ format: 'email', maxLength: 320 })
   @IsOptional()
-  @IsString()
-  @MaxLength(512)
-  recipientEmailHash?: string;
+  @IsEmail()
+  @MaxLength(320)
+  recipient_email?: string;
 }

@@ -1,4 +1,10 @@
-import { Body, Controller, Post } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Headers,
+  Post,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { Public } from './decorators/public.decorator.js';
 import { RateLimit } from '../rate-limit/rate-limit.decorator.js';
 import {
@@ -12,7 +18,12 @@ import {
   VerifyEmailDto,
 } from './dto/auth.dto.js';
 import { AuthService } from './services/auth.service.js';
-import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import {
+  ApiBearerAuth,
+  ApiOperation,
+  ApiResponse,
+  ApiTags,
+} from '@nestjs/swagger';
 
 @Public()
 @ApiTags('Authentication')
@@ -47,7 +58,7 @@ export class AuthController {
   @ApiResponse({
     status: 201,
     description:
-      'Returns Cognito tokens. A refresh token may be omitted by Cognito.',
+      'Returns Supabase Auth tokens. A refresh token may be omitted when the session does not provide one.',
     schema: {
       type: 'object',
       required: ['accessToken', 'idToken', 'expiresIn', 'tokenType'],
@@ -64,12 +75,30 @@ export class AuthController {
     return this.auth.login(dto.email, dto.password);
   }
 
+  @Post('oauth/github/session')
+  @RateLimit('auth_login')
+  @ApiBearerAuth('supabase')
+  @ApiOperation({
+    summary: 'Register a verified GitHub OAuth session for customer access',
+  })
+  @ApiResponse({
+    status: 201,
+    description: 'Links or creates the Keydrop customer profile.',
+  })
+  completeGithubOAuth(@Headers('authorization') authorization?: string) {
+    const [scheme, token, ...extra] = authorization?.trim().split(/\s+/) ?? [];
+    if (scheme?.toLowerCase() !== 'bearer' || !token || extra.length > 0) {
+      throw new UnauthorizedException('A Supabase access token is required');
+    }
+    return this.auth.completeGithubOAuth(token);
+  }
+
   @Post('email/verify')
   @RateLimit('otp_verify')
   @ApiOperation({ summary: 'Verify an email address' })
   @ApiResponse({
     status: 201,
-    description: 'Confirms the email address.',
+    description: 'Confirms the email address using its verification code.',
     schema: {
       type: 'object',
       required: ['email', 'emailVerified'],
@@ -145,14 +174,20 @@ export class AuthController {
   @ApiOperation({ summary: 'Refresh authentication tokens' })
   @ApiResponse({
     status: 201,
-    description:
-      'Returns refreshed Cognito tokens. The refresh token is not returned.',
+    description: 'Returns refreshed Supabase Auth tokens.',
     schema: {
       type: 'object',
-      required: ['accessToken', 'idToken', 'expiresIn', 'tokenType'],
+      required: [
+        'accessToken',
+        'idToken',
+        'refreshToken',
+        'expiresIn',
+        'tokenType',
+      ],
       properties: {
         accessToken: { type: 'string' },
         idToken: { type: 'string' },
+        refreshToken: { type: 'string' },
         expiresIn: { type: 'integer' },
         tokenType: { type: 'string', example: 'Bearer' },
       },

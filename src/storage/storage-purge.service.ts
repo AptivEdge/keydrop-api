@@ -3,43 +3,44 @@ import {
   DeleteObjectsCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
-import {
-  Injectable,
-  Logger,
-} from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service.js';
+import {
+  createObjectStorageClient,
+  getObjectStorageOptions,
+} from '../providers/object-storage-options.js';
 
 const MAX_RETRY_DELAY_MS = 24 * 60 * 60 * 1000;
 
 @Injectable()
 export class StoragePurgeService {
   private readonly logger = new Logger(StoragePurgeService.name);
-  private readonly s3?: S3Client;
+  private readonly client?: S3Client;
   private readonly bucket?: string;
 
   constructor(
     private readonly prisma: PrismaService,
     config: ConfigService,
   ) {
-    const region = config.get<string>('S3_REGION');
-    this.bucket = config.get<string>('S3_BUCKET');
-    if (region && this.bucket) {
-      this.s3 = new S3Client({ region });
+    const storage = getObjectStorageOptions(config);
+    this.bucket = storage?.bucket;
+    if (storage) {
+      this.client = createObjectStorageClient(storage);
     }
   }
 
   async purgeSecret(secretId: string, storageRefs: string[]): Promise<void> {
     const refs = [...new Set(storageRefs.filter(Boolean))];
     if (!refs.length) return;
-    if (!this.s3 || !this.bucket) {
-      await this.queue(secretId, refs, 'S3 storage is not configured');
+    if (!this.client || !this.bucket) {
+      await this.queue(secretId, refs, 'Object storage is not configured');
       return;
     }
 
     try {
       for (let index = 0; index < refs.length; index += 1000) {
-        const result = await this.s3.send(
+        const result = await this.client.send(
           new DeleteObjectsCommand({
             Bucket: this.bucket,
             Delete: {
@@ -51,7 +52,7 @@ export class StoragePurgeService {
         const failures = result.Errors ?? [];
         if (failures.length) {
           throw new Error(
-            `S3 failed to delete ${failures.length} storage objects`,
+            `Object storage failed to delete ${failures.length} objects`,
           );
         }
       }
@@ -66,7 +67,7 @@ export class StoragePurgeService {
   }
 
   async processRetries(): Promise<void> {
-    if (!this.s3 || !this.bucket) return;
+    if (!this.client || !this.bucket) return;
     const pending = await this.prisma.storageDeletion.findMany({
       where: {
         deletedAt: null,
@@ -78,7 +79,7 @@ export class StoragePurgeService {
     });
     for (const item of pending) {
       try {
-        await this.s3.send(
+        await this.client.send(
           new DeleteObjectCommand({
             Bucket: this.bucket,
             Key: item.storageRef,
@@ -131,7 +132,9 @@ export class StoragePurgeService {
         }),
       ),
     );
-    this.logger.error(`Queued ${refs.length} storage objects for retry: ${error}`);
+    this.logger.error(
+      `Queued ${refs.length} storage objects for retry: ${error}`,
+    );
   }
 
   private markDeleted(refs: string[]): Promise<unknown> {

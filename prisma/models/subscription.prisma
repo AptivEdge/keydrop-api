@@ -12,6 +12,7 @@ model Subscription {
   pastDueSince          DateTime?
   lastProviderEventAt   DateTime?
   status                SubscriptionStatus @default(incomplete)
+  cancelAtPeriodEnd     Boolean            @default(false)
   currentPeriodStart    DateTime?
   currentPeriodEnd      DateTime?
   createdAt             DateTime           @default(now())

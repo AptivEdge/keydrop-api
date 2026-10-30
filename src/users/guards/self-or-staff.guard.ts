@@ -6,7 +6,7 @@ import {
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { SELF_OR_STAFF_KEY } from '../decorators/self-or-staff.decorator.js';
-import { AuthenticatedUser } from '../../common/auth/guards/cognito-auth.guard.js';
+import { AuthenticatedUser } from '../../common/auth/guards/supabase-auth.guard.js';
 
 type RequestWithUser = {
   user: AuthenticatedUser;

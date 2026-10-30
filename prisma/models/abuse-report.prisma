@@ -5,6 +5,9 @@ model AbuseReport {
   reason     String
   details    String?
   status     AbuseReportStatus @default(pending)
+  severity   String            @default("normal")
+  assigneeId String?
+  resolutionNote String?
   createdAt  DateTime          @default(now())
   updatedAt  DateTime          @updatedAt
 

@@ -16,9 +16,9 @@ the frontend application itself is not present here.
 
 - Prefix every route with `/api/v1`.
 - Swagger is available at `/api/v1/docs` outside production when enabled.
-- Protected routes use `Authorization: Bearer <Cognito ID token>`. The API
-  verifies the token against the customer or staff Cognito pool, then resolves
-  the local user record from PostgreSQL.
+- Protected routes use the Supabase Auth `accessToken` as a bearer token. The
+  API verifies the JWT and resolves its identity subject to a local user record
+  in PostgreSQL.
 - Pro and Team API keys can replace a customer token only on routes marked
   with a required scope below. Send them in the same bearer header; they begin
   with `kd_`. API keys cannot access staff operations.
@@ -34,28 +34,31 @@ the frontend application itself is not present here.
 
 ### 2.1 Create an account and authenticate
 
-1. Call `POST /auth/signup` with email and password. Cognito creates the
+1. Call `POST /auth/signup` with email and password. Supabase Auth creates the
    identity; the response indicates
    whether confirmation is required and whether the next step is `login` or
    `confirm_email`.
-2. If requested, verify using `POST /auth/email/verify`; a new code can be
-   requested through `POST /auth/email/resend`.
-3. Call `POST /auth/login` to obtain Cognito tokens. Login also synchronizes
-   the local user record. Use the `idToken` as the bearer token for protected
-   API requests.
+2. Enter the six-digit verification code from the email and submit the email
+   and code to `POST /auth/email/verify`. A new code can be requested through
+   `POST /auth/email/resend` with the email address.
+3. Call `POST /auth/login` to obtain Supabase Auth tokens. Login also
+   synchronizes the local user record. Use `accessToken` as the bearer token
+   for protected API requests. `idToken` remains only as a compatibility alias.
 4. Refresh with `POST /auth/token/refresh` before expiry and call
    `POST /auth/logout` to sign out the supplied access token.
 5. For a forgotten password, request a code with `POST /auth/password/forgot`
    and submit it with the new password to `POST /auth/password/reset`.
 
-Email/password authentication and reset are handled by Cognito through the
-auth service; the API does not use its local generated password hash for login.
+Email/password authentication and reset are handled by Supabase Auth through
+the API's auth service; the API does not use its local generated password hash
+for login.
 
 ### 2.2 Create and reveal a secret
 
-1. For an account-owned secret, call `POST /secrets` with a Cognito ID token or
-   a Pro/Team API key scoped `secrets:write`. For anonymous sharing, use
-   `POST /secrets/anonymous` without authentication.
+1. Create a secret only with a Pro or Team account: call `POST /secrets` with
+   a Supabase Auth access token or a Pro/Team API key scoped `secrets:write`.
+   Requests without an authenticated paid account receive `403 Forbidden`.
+   `POST /secrets/anonymous` is disabled and also returns `403 Forbidden`.
 2. Encrypt the secret in the client before sending it. The API persists
    ciphertext references and encryption metadata, not plaintext or a decryption
    key. The client must retain/provide the decryption material through its
@@ -80,10 +83,10 @@ the request's pending status to approved or denied. That status update does
 not itself issue a recipient access token; email-gated reveal still requires
 the token issued by `/access/request`.
 
-Anonymous secret creation is deliberately limited by the API. The public DTO
-supports no more than three views and an expiry within 24 hours. Account-owned
-secret limits and available features depend on the current plan; load
-`GET /me/entitlements` rather than hard-coding plan limits in the UI.
+Account-owned secret limits and available features depend on the current plan;
+load `GET /me/entitlements` rather than hard-coding plan limits in the UI.
+Free accounts can sign in and view existing history, but cannot create
+secrets. Recipients can still open existing links without an account.
 
 ### 2.3 Account dashboard and settings
 
@@ -95,8 +98,15 @@ determines which events and audit records remain available.
 Account-owned secret history and event endpoints return metadata rather than
 secret plaintext. Deleting a secret from account history is limited to a
 terminal secret. Account export returns account data and short-lived URLs for
-active encrypted objects. Account deletion removes the Cognito identity and
-account-owned data while retaining billing records in anonymized form.
+active encrypted objects. Account deletion removes the Supabase Auth identity
+and account-owned data while retaining billing records in anonymized form.
+
+The owner can revalidate and copy a saved secret link up to three times.
+Recovery is counted server-side; a fourth recovery attempt locks the secret and
+purges its encrypted content and file objects. The server cannot reconstruct a
+lost link key, so the owner must provide the original saved link. Owner reveal
+returns encrypted content only on explicit request; the client decrypts it
+locally and the operation does not consume a recipient view.
 
 ### 2.4 Teams
 
@@ -111,45 +121,52 @@ token. Team policies are JSON rules for the supported policy types.
 The user billing flow is:
 
 1. Load billing overview and subscriptions from `/me/billing`.
-2. Create checkout for a Pro or Team monthly/yearly plan.
+2. Create checkout for a Pro or Team monthly/yearly plan. The API verifies
+   that the configured Razorpay plan matches the published INR amount: Pro
+   ₹299 monthly / ₹2,990 yearly and Team ₹999 monthly / ₹9,990 yearly.
 3. Complete Razorpay checkout in the client and submit the provider identifiers
    and signature to `/me/billing/verify`.
-4. Treat this verification response as signature verification only:
-   `webhookRequired` remains true, so reflect the subscription state only after
-   backend webhook/reconciliation updates are visible.
-5. Use billing reads for invoices/refunds; cancel or schedule a plan change
-   through the subscription routes.
+4. The API verifies the checkout signature, fetches the Razorpay subscription,
+   and activates the plan immediately when Razorpay reports it as active.
+   Signed webhooks remain the event source of truth; if provider activation is
+   still pending, use `POST /me/billing/refresh` to check again without creating
+   another payment.
+5. Use billing reads for invoices/refunds; cancellation is scheduled for the
+   end of the current paid period and plan changes can be scheduled through
+   the subscription routes.
 
 Prices are managed by the configured Razorpay plans and are denominated in
 INR. Do not infer an active plan from a successful browser checkout alone.
+Checkout and payment verification require configured Razorpay credentials and
+all four Razorpay plan IDs.
 
 ## 3. Route catalogue
 
 All routes below are relative to `/api/v1`. `Public` means no authentication;
-otherwise use a Cognito ID token unless the API-key scope column explicitly
-permits a scoped key.
+otherwise use a Supabase Auth access token unless the API-key scope column
+explicitly permits a scoped key.
 
 ### Service and authentication
 
-| Method | Route                   | Access | Purpose                         |
-| ------ | ----------------------- | ------ | ------------------------------- |
-| `GET`  | `/`                     | Public | Welcome response                |
-| `GET`  | `/health`               | Public | API status and timestamp        |
-| `POST` | `/auth/signup`          | Public | Register via Cognito            |
-| `POST` | `/auth/login`           | Public | Authenticate and return tokens  |
-| `POST` | `/auth/email/verify`    | Public | Confirm email with code         |
-| `POST` | `/auth/email/resend`    | Public | Request a new confirmation code |
-| `POST` | `/auth/password/forgot` | Public | Request password-reset code     |
-| `POST` | `/auth/password/reset`  | Public | Reset password with code        |
-| `POST` | `/auth/token/refresh`   | Public | Refresh Cognito tokens          |
-| `POST` | `/auth/logout`          | Public | Sign out supplied access token  |
+| Method | Route                   | Access | Purpose                                     |
+| ------ | ----------------------- | ------ | ------------------------------------------- |
+| `GET`  | `/`                     | Public | Welcome response                            |
+| `GET`  | `/health`               | Public | API status and timestamp                    |
+| `POST` | `/auth/signup`          | Public | Register through Supabase Auth              |
+| `POST` | `/auth/login`           | Public | Authenticate and return tokens              |
+| `POST` | `/auth/email/verify`    | Public | Confirm email with email and six-digit code |
+| `POST` | `/auth/email/resend`    | Public | Request a new confirmation code             |
+| `POST` | `/auth/password/forgot` | Public | Request password-reset code                 |
+| `POST` | `/auth/password/reset`  | Public | Reset password with code                    |
+| `POST` | `/auth/token/refresh`   | Public | Refresh Supabase Auth tokens                |
+| `POST` | `/auth/logout`          | Public | Sign out supplied access token              |
 
 ### Secrets and recipient access
 
 | Method | Route                                 | Access / scope                | Purpose                                        |
 | ------ | ------------------------------------- | ----------------------------- | ---------------------------------------------- |
-| `POST` | `/secrets`                            | User / `secrets:write`        | Create an account-owned secret                 |
-| `POST` | `/secrets/anonymous`                  | Public                        | Create an anonymous secret                     |
+| `POST` | `/secrets`                            | Pro/Team user / `secrets:write` | Create an account-owned secret requiring an active paid plan |
+| `POST` | `/secrets/anonymous`                  | Public (disabled)             | Returns 403; anonymous creation is unavailable |
 | `GET`  | `/secrets/:id/meta`                   | Public                        | Read metadata without consuming a view         |
 | `POST` | `/secrets/:id/access/request`         | Public                        | Request recipient email access                 |
 | `POST` | `/secrets/:id/reveal`                 | Public                        | Consume a view and retrieve encrypted material |
@@ -158,13 +175,12 @@ permits a scoped key.
 | `POST` | `/secrets/:id/requests`               | Public                        | Create a secret access request                 |
 | `GET`  | `/secrets/:id/requests`               | Owner / `secrets:read`        | List requests for an owned secret              |
 | `POST` | `/secrets/:id/requests/:requestId`    | Owner / `secrets:write`       | Approve or deny a request                      |
-| `POST` | `/secrets/:id/files`                  | Owner / `secrets:write`       | Create a presigned upload URL                  |
-| `POST` | `/secrets/:id/files/:fileId/complete` | Owner / `secrets:write`       | Verify and complete file upload                |
+| `POST` | `/secrets/:id/files`                  | Pro/Team owner / `secrets:write` | Create a presigned upload URL              |
+| `POST` | `/secrets/:id/files/:fileId/complete` | Pro/Team owner / `secrets:write` | Verify and complete file upload            |
 | `GET`  | `/secrets/:id/files/:fileId/download` | Owner / `secrets:read`        | Create a presigned download URL                |
 
-Upload and download URLs are short-lived (900 seconds). The API supports
-file operations on account-owned secrets; the documented anonymous creation
-flow does not provide anonymous file-upload routes.
+Upload and download URLs are short-lived (900 seconds). File uploads are
+available only to active Pro and Team accounts.
 
 ### User profile and account
 
@@ -177,7 +193,9 @@ flow does not provide anonymous file-upload routes.
 | `GET`    | `/me/stats`                    | User / `account:read`    | Read secret usage counts                       |
 | `GET`    | `/me/secrets`                  | User / `secrets:read`    | Cursor-page owned secrets                      |
 | `GET`    | `/me/secrets/:id`              | Owner / `secrets:read`   | Read owned-secret summary                      |
-| `GET`    | `/me/secrets/:id/events`       | Owner / `secrets:read`   | Read retained events for a secret              |
+| `POST` | `/me/secrets/:id/recovery`     | Owner / `secrets:write`  | Revalidate/count recovery; fourth attempt locks secret |
+| `POST` | `/me/secrets/:id/reveal`       | Owner / `secrets:read`   | Return encrypted content without consuming a view |
+| `GET`  | `/me/secrets/:id/events`       | Owner / `secrets:read`   | Read retained events for a secret              |
 | `DELETE` | `/me/secrets/:id`              | Owner / `secrets:write`  | Delete a terminal secret                       |
 | `GET`    | `/me/audit`                    | User / `account:read`    | Read retained audit history (Pro/Team)         |
 | `POST`   | `/me/api-keys`                 | User token               | Create an API key (Pro/Team)                   |
@@ -225,10 +243,11 @@ Only the owner can invite or assign a member to the `admin` team role.
 | `GET`    | `/me/billing/subscriptions`                 | User / `billing:read`  | List subscriptions                 |
 | `GET`    | `/me/billing/invoices`                      | User / `billing:read`  | Cursor-page invoices               |
 | `GET`    | `/me/billing/refunds`                       | User / `billing:read`  | Cursor-page synchronized refunds   |
-| `DELETE` | `/me/billing/subscriptions/:id`             | User / `billing:write` | Cancel own subscription            |
+| `DELETE` | `/me/billing/subscriptions/:id`             | User / `billing:write` | Cancel at the end of the current paid period |
 | `POST`   | `/me/billing/subscriptions/:id/change-plan` | User / `billing:write` | Schedule plan change at cycle end  |
 | `POST`   | `/me/billing/checkout`                      | User / `billing:write` | Create Razorpay checkout           |
-| `POST`   | `/me/billing/verify`                        | User / `billing:write` | Verify Razorpay checkout signature |
+| `POST`   | `/me/billing/verify`                        | User / `billing:write` | Verify payment and sync active subscription |
+| `POST`   | `/me/billing/refresh`                       | User / `billing:write` | Refresh subscription status from Razorpay |
 
 ## 4. Plan and API-key behavior
 
@@ -256,5 +275,9 @@ after successful authorization.
   passphrase data in analytics, browser logs, or error telemetry.
 - Preserve `nextCursor` until the next page is requested; do not synthesize
   cursors.
-- Treat verification of Razorpay checkout signature as an intermediate step;
-  webhook delivery and reconciliation determine persisted subscription state.
+- Never grant a paid plan from a browser callback alone. The API verifies the
+  signature and confirms the subscription state directly with Razorpay; signed
+  webhook delivery and scheduled reconciliation continue to synchronize it.
+- If checkout succeeds but activation is delayed, offer an authenticated
+  billing refresh and tell the customer not to retry payment while status is
+  pending.

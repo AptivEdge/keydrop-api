@@ -30,7 +30,7 @@ export class RateLimitGuard implements CanActivate {
     private readonly rateLimit: RateLimitService,
   ) {}
 
-  canActivate(context: ExecutionContext): boolean {
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     const policy = this.reflector.getAllAndOverride<RateLimitPolicy>(
       RATE_LIMIT_KEY,
       [context.getHandler(), context.getClass()],
@@ -41,7 +41,7 @@ export class RateLimitGuard implements CanActivate {
 
     const request = context.switchToHttp().getRequest<RateLimitedRequest>();
     const key = this.getClientKey(request);
-    const result = this.rateLimit.consume(policy, key);
+    const result = await this.rateLimit.consume(policy, key);
     if (!result.allowed) {
       context
         .switchToHttp()
@@ -49,6 +49,7 @@ export class RateLimitGuard implements CanActivate {
         .setHeader('Retry-After', String(result.retryAfterSeconds));
       throw new HttpException(
         {
+          code: 'rate_limited',
           message: 'Too many requests; please try again later',
           retryAfterSeconds: result.retryAfterSeconds,
         },

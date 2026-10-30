@@ -1,0 +1,31 @@
+enum AdminDataRequestKind {
+  export
+  deletion
+}
+
+enum AdminDataRequestStatus {
+  received
+  verifying
+  processing
+  completed
+  rejected
+}
+
+model AdminDataRequest {
+  id          String                  @id @default(cuid())
+  userId      String
+  kind        AdminDataRequestKind
+  status      AdminDataRequestStatus  @default(received)
+  reason      String
+  staffNote   String?
+  dueAt       DateTime
+  createdById String
+  createdAt   DateTime                @default(now())
+  updatedAt   DateTime                @updatedAt
+
+  user      User @relation("DataRequestSubject", fields: [userId], references: [id], onDelete: Restrict)
+  createdBy User @relation("DataRequestCreator", fields: [createdById], references: [id], onDelete: Restrict)
+
+  @@index([status, dueAt])
+  @@index([userId, createdAt])
+}

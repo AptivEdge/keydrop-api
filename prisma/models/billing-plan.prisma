@@ -1,0 +1,17 @@
+model BillingPlan {
+  id             String         @id @default(cuid())
+  tier           UserPlan
+  interval       BillingInterval
+  providerPlanId String         @unique
+  name           String
+  amount         Int
+  currency       String         @default("INR") @db.VarChar(3)
+  active         Boolean        @default(true)
+  createdById    String
+  createdAt      DateTime       @default(now())
+
+  createdBy User @relation("BillingPlanCreator", fields: [createdById], references: [id], onDelete: Restrict)
+
+  @@index([tier, interval, active])
+  @@index([createdAt])
+}

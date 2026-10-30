@@ -14,8 +14,9 @@ import { SelfOrStaff } from '../decorators/self-or-staff.decorator.js';
 import { SelfOrStaffGuard } from '../guards/self-or-staff.guard.js';
 import { CreateUserDto } from '../dto/create-user.dto.js';
 import { UpdateMeDto, UpdateUserDto } from '../dto/update-user.dto.js';
+import { ModerationReasonDto } from '../dto/moderation-reason.dto.js';
 import { UsersService } from './users.service.js';
-import type { AuthenticatedUser } from '../../common/auth/guards/cognito-auth.guard.js';
+import type { AuthenticatedUser } from '../../common/auth/guards/supabase-auth.guard.js';
 import {
   ApiBearerAuth,
   ApiOperation,
@@ -24,7 +25,7 @@ import {
 } from '@nestjs/swagger';
 
 @ApiTags('Users')
-@ApiBearerAuth('cognito')
+@ApiBearerAuth('supabase')
 @Controller('users')
 export class UsersController {
   constructor(private readonly users: UsersService) {}
@@ -39,6 +40,28 @@ export class UsersController {
   })
   findAll() {
     return this.users.findAll();
+  }
+
+  @Post(':id/suspend')
+  @AuthRoles('TS', 'ADM')
+  @ApiOperation({ summary: 'Suspend a customer account' })
+  suspend(
+    @Param('id') id: string,
+    @Body() dto: ModerationReasonDto,
+    @CurrentUser() actor: AuthenticatedUser,
+  ) {
+    return this.users.setSuspended(id, actor.userId, dto.reason, true);
+  }
+
+  @Post(':id/unsuspend')
+  @AuthRoles('TS', 'ADM')
+  @ApiOperation({ summary: 'Restore a suspended customer account' })
+  unsuspend(
+    @Param('id') id: string,
+    @Body() dto: ModerationReasonDto,
+    @CurrentUser() actor: AuthenticatedUser,
+  ) {
+    return this.users.setSuspended(id, actor.userId, dto.reason, false);
   }
 
   @Post()
@@ -117,9 +140,11 @@ function userSchema() {
     required: [
       'id',
       'email',
-      'cognitoSubject',
+      'identitySubject',
       'plan',
       'emailVerifiedAt',
+      'suspendedAt',
+      'suspensionReason',
       'createdAt',
       'updatedAt',
       'adminUser',
@@ -127,9 +152,11 @@ function userSchema() {
     properties: {
       id: { type: 'string' },
       email: { type: 'string', format: 'email' },
-      cognitoSubject: { type: 'string' },
+      identitySubject: { type: 'string' },
       plan: { type: 'string', enum: ['free', 'pro', 'team'] },
       emailVerifiedAt: { type: 'string', format: 'date-time', nullable: true },
+      suspendedAt: { type: 'string', format: 'date-time', nullable: true },
+      suspensionReason: { type: 'string', nullable: true },
       createdAt: { type: 'string', format: 'date-time' },
       updatedAt: { type: 'string', format: 'date-time' },
       adminUser: {

@@ -1,22 +1,11 @@
-import {
-  Injectable,
-  Logger,
-  ServiceUnavailableException,
-} from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { SESv2Client, SendEmailCommand } from '@aws-sdk/client-sesv2';
+import { Injectable } from '@nestjs/common';
 import type { NotificationType } from '../common/notifications/notification-preferences.js';
+import type { EmailMessage } from '../email/email-provider.js';
+import { EmailService } from '../email/email.service.js';
 
 @Injectable()
 export class EmailDeliveryService {
-  private readonly logger = new Logger(EmailDeliveryService.name);
-  private readonly client: SESv2Client;
-
-  constructor(private readonly config: ConfigService) {
-    this.client = new SESv2Client({
-      region: this.config.get<string>('SES_REGION'),
-    });
-  }
+  constructor(private readonly email: EmailService) {}
 
   async sendTeamInvitation(
     recipient: string,
@@ -24,104 +13,56 @@ export class EmailDeliveryService {
     inviteUrl: string,
     expiresAt: Date,
   ): Promise<void> {
-    const from = this.config.get<string>('SES_FROM_EMAIL');
-    if (!from) {
-      throw new ServiceUnavailableException('SES_FROM_EMAIL is not configured');
-    }
-    try {
-      await this.client.send(
-        new SendEmailCommand({
-          FromEmailAddress: from,
-          Destination: { ToAddresses: [recipient] },
-          Content: {
-            Simple: {
-              Subject: { Data: `Invitation to join ${teamName}` },
-              Body: {
-                Text: {
-                  Data: [
-                    `You have been invited to join ${teamName} on Keydrop.`,
-                    '',
-                    `Accept the invitation: ${inviteUrl}`,
-                    `This link expires on ${expiresAt.toISOString()}.`,
-                  ].join('\n'),
-                },
-              },
-            },
-          },
-        }),
-      );
-    } catch (error) {
-      this.logger.error('Failed to send team invitation email', error);
-      throw new ServiceUnavailableException(
-        'Unable to deliver team invitation',
-      );
-    }
+    await this.deliver({
+      to: recipient,
+      template: 'team_invitation',
+      variables: {
+        TEAM_NAME: teamName,
+        INVITE_URL: inviteUrl,
+        EXPIRES_AT: expiresAt.toISOString(),
+      },
+    });
+  }
+
+  async sendSecretRequestInvitation(
+    recipient: string,
+    title: string,
+    requestUrl: string,
+    expiresAt: Date,
+  ): Promise<void> {
+    await this.deliver({
+      to: recipient,
+      template: 'secret_request',
+      variables: {
+        REQUEST_TITLE: title,
+        REQUEST_URL: requestUrl,
+        EXPIRES_AT: expiresAt.toISOString(),
+      },
+    });
   }
 
   async sendNotificationEmail(
     recipient: string,
     type: NotificationType,
   ): Promise<void> {
-    const from = this.config.get<string>('SES_FROM_EMAIL');
-    if (!from) {
-      throw new ServiceUnavailableException('SES_FROM_EMAIL is not configured');
-    }
-    const messages: Record<
-      NotificationType,
-      { subject: string; body: string }
-    > = {
-      secret_created: {
-        subject: 'A Keydrop secret was created',
-        body: 'A secret was created in your Keydrop account.',
-      },
-      secret_viewed: {
-        subject: 'A Keydrop secret was viewed',
-        body: 'One of your Keydrop secrets was viewed.',
-      },
-      secret_expiring: {
-        subject: 'A Keydrop secret is expiring soon',
-        body: 'One of your Keydrop secrets is scheduled to expire within 24 hours.',
-      },
-      secret_expired: {
-        subject: 'A Keydrop secret expired',
-        body: 'One of your Keydrop secrets has expired.',
-      },
-      access_requested: {
-        subject: 'A Keydrop secret access was requested',
-        body: 'Someone requested access to one of your Keydrop secrets.',
-      },
-      access_granted: {
-        subject: 'A Keydrop secret request was approved',
-        body: 'A request to access one of your Keydrop secrets was approved.',
-      },
-      access_denied: {
-        subject: 'A Keydrop secret request was denied',
-        body: 'A request to access one of your Keydrop secrets was denied.',
-      },
-      billing_payment_failed: {
-        subject: 'Your Keydrop payment could not be processed',
-        body: 'We could not process your subscription payment. Update your payment method in Razorpay to avoid interruption.',
-      },
+    const templates: Record<NotificationType, EmailMessage['template']> = {
+      secret_created: 'notification_secret_created',
+      secret_viewed: 'notification_secret_viewed',
+      secret_expiring: 'notification_secret_expiring',
+      secret_expired: 'notification_secret_expired',
+      access_requested: 'notification_access_requested',
+      access_granted: 'notification_access_granted',
+      access_denied: 'notification_access_denied',
+      billing_payment_failed: 'notification_billing_payment_failed',
     };
-    const message = messages[type];
-    try {
-      await this.client.send(
-        new SendEmailCommand({
-          FromEmailAddress: from,
-          Destination: { ToAddresses: [recipient] },
-          Content: {
-            Simple: {
-              Subject: { Data: message.subject },
-              Body: { Text: { Data: message.body } },
-            },
-          },
-        }),
-      );
-    } catch (error) {
-      this.logger.error('Failed to send notification email', error);
-      throw new ServiceUnavailableException(
-        'Unable to deliver notification email',
-      );
-    }
+    await this.deliver({
+      to: recipient,
+      template: templates[type],
+      variables: {},
+    });
+  }
+
+  private async deliver(message: EmailMessage): Promise<void> {
+    await this.email.send(message);
   }
 }

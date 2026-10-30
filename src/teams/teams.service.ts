@@ -52,13 +52,14 @@ export class TeamsService {
 
   async listForUser(userId: string, cursor?: string, limit = 50) {
     const rows = await this.prisma.team.findMany({
-      where: { members: { some: { userId } } },
+      where: { suspendedAt: null, members: { some: { userId } } },
       select: {
         id: true,
         name: true,
         createdBy: true,
         createdAt: true,
         updatedAt: true,
+        suspendedAt: true,
         members: {
           where: { userId },
           select: { role: true },
@@ -81,6 +82,7 @@ export class TeamsService {
         createdBy: true,
         createdAt: true,
         updatedAt: true,
+        suspendedAt: true,
         members: {
           select: {
             id: true,
@@ -309,11 +311,19 @@ export class TeamsService {
         revokedAt: true,
       },
     });
+    const team = invitation
+      ? await this.prisma.team.findUnique({
+          where: { id: invitation.teamId },
+          select: { suspendedAt: true },
+        })
+      : null;
     if (
       !invitation ||
       invitation.acceptedAt ||
       invitation.revokedAt ||
-      invitation.expiresAt <= new Date()
+      invitation.expiresAt <= new Date() ||
+      !team ||
+      team.suspendedAt
     ) {
       throw new ConflictException('Invitation is invalid or expired');
     }
@@ -395,9 +405,12 @@ export class TeamsService {
   private async requireMember(userId: string, teamId: string) {
     const membership = await this.prisma.teamMember.findUnique({
       where: { teamId_userId: { teamId, userId } },
-      select: { role: true },
+      select: { role: true, team: { select: { suspendedAt: true } } },
     });
     if (!membership) throw new NotFoundException('Team not found');
+    if (membership.team.suspendedAt) {
+      throw new ForbiddenException('This team is suspended');
+    }
     return membership;
   }
 }

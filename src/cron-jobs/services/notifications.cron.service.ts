@@ -20,7 +20,7 @@ export class NotificationsCronService {
     const secrets = await this.prisma.secret.findMany({
       where: {
         ownerId: { not: null },
-        status: 'active',
+        status: { in: ['active', 'partially_viewed'] },
         expiresAt: { gt: now, lte: expiringBefore },
         notifications: { none: { type: 'secret_expiring' } },
       },

@@ -1,6 +1,11 @@
-import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  ServiceUnavailableException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { CognitoJwtVerifier } from 'aws-jwt-verify';
+import { createRemoteJWKSet, errors as joseErrors, jwtVerify } from 'jose';
 import { UserType } from '../../core/constants/app.constants.js';
 
 export interface TokenPayload {
@@ -15,52 +20,32 @@ export interface TokenPayload {
   exp: number;
   iat: number;
   token_use: 'access' | 'id';
+  authProvider?: 'supabase';
   'custom:role'?: string;
   [key: string]: unknown;
 }
 
-type JwtVerifier = {
-  verify(token: string): Promise<Record<string, unknown>>;
-};
-
-type CognitoPool = {
-  name: string;
-  userPoolId: string;
-  clientId: string;
-};
-
 @Injectable()
 export class TokenValidationService {
   private readonly logger = new Logger(TokenValidationService.name);
-  private readonly idVerifiers: JwtVerifier[] = [];
-  private readonly accessVerifiers: JwtVerifier[] = [];
+  private readonly supabaseIssuer?: string;
+  private readonly supabaseJwks?: ReturnType<typeof createRemoteJWKSet>;
 
   constructor(private readonly configService: ConfigService) {
-    const pools = this.getConfiguredPools();
-    if (pools.length === 0) {
+    const supabaseUrl = this.configService
+      .get<string>('SUPABASE_URL')
+      ?.replace(/\/+$/, '');
+    if (!supabaseUrl) {
       this.logger.warn(
-        'Cognito is not configured. Set USER_COGNITO or ADMIN_COGNITO pool settings.',
+        'Supabase Auth is configured but SUPABASE_URL is not configured.',
       );
       return;
     }
-
-    for (const pool of pools) {
-      this.idVerifiers.push(
-        CognitoJwtVerifier.create({
-          userPoolId: pool.userPoolId,
-          clientId: pool.clientId,
-          tokenUse: 'id',
-        }),
-      );
-      this.accessVerifiers.push(
-        CognitoJwtVerifier.create({
-          userPoolId: pool.userPoolId,
-          clientId: pool.clientId,
-          tokenUse: 'access',
-        }),
-      );
-      this.logger.log(`Initialized Cognito verifier for ${pool.name} pool`);
-    }
+    this.supabaseIssuer = `${supabaseUrl}/auth/v1`;
+    this.supabaseJwks = createRemoteJWKSet(
+      new URL(`${this.supabaseIssuer}/.well-known/jwks.json`),
+    );
+    this.logger.log('Initialized Supabase JWT verifier');
   }
 
   async validateToken(
@@ -70,30 +55,7 @@ export class TokenValidationService {
     if (!token.trim()) {
       throw new UnauthorizedException('Token is required');
     }
-
-    const verifiers =
-      tokenType === 'id' ? this.idVerifiers : this.accessVerifiers;
-    if (verifiers.length === 0) {
-      throw new UnauthorizedException('Authentication is not configured');
-    }
-
-    for (const verifier of verifiers) {
-      try {
-        const payload = await verifier.verify(token);
-        const normalized = this.normalizePayload(payload, tokenType);
-
-        return {
-          ...normalized,
-          userType: UserType.USER,
-          role: 'USER',
-        };
-      } catch {
-        // A token can belong to any configured pool. Continue until one verifies it.
-      }
-    }
-
-    this.logger.warn(`Cognito ${tokenType} token validation failed`);
-    throw new UnauthorizedException('Invalid or expired authentication token');
+    return this.validateSupabaseToken(token, tokenType);
   }
 
   checkTokenExpiry(payload: TokenPayload) {
@@ -108,6 +70,7 @@ export class TokenValidationService {
   private normalizePayload(
     payload: Record<string, unknown>,
     tokenType: 'id' | 'access',
+    authProvider: 'supabase',
   ): TokenPayload {
     if (
       typeof payload.sub !== 'string' ||
@@ -124,9 +87,7 @@ export class TokenValidationService {
       username:
         typeof payload.username === 'string'
           ? payload.username
-          : typeof payload['cognito:username'] === 'string'
-            ? payload['cognito:username']
-            : payload.sub,
+          : payload.sub,
       email: typeof payload.email === 'string' ? payload.email : undefined,
       phone_number:
         typeof payload.phone_number === 'string'
@@ -140,24 +101,43 @@ export class TokenValidationService {
       exp: payload.exp,
       iat: payload.iat,
       token_use: tokenType,
+      authProvider,
     };
   }
 
-  private getConfiguredPools(): CognitoPool[] {
-    const poolPrefixes = ['USER', 'ADMIN'];
-    return poolPrefixes.flatMap((prefix) => {
-      const userPoolId = this.configService.get<string>(
-        `${prefix}_COGNITO_USER_POOL_ID`,
-      );
-      const clientId = this.configService.get<string>(
-        `${prefix}_COGNITO_CLIENT_ID`,
-      );
+  private async validateSupabaseToken(
+    token: string,
+    tokenType: 'id' | 'access',
+  ): Promise<TokenPayload & { userType: UserType; role: string }> {
+    if (!this.supabaseJwks || !this.supabaseIssuer) {
+      throw new UnauthorizedException('Authentication is not configured');
+    }
 
-      if (!userPoolId || !clientId) {
-        return [];
+    try {
+      const { payload } = await jwtVerify(token, this.supabaseJwks, {
+        issuer: this.supabaseIssuer,
+        audience: 'authenticated',
+      });
+      const normalized = this.normalizePayload(payload, tokenType, 'supabase');
+      return {
+        ...normalized,
+        userType: UserType.USER,
+        role: 'USER',
+      };
+    } catch (error) {
+      if (
+        error instanceof joseErrors.JOSEError &&
+        error.code !== 'ERR_JWKS_TIMEOUT'
+      ) {
+        this.logger.warn('Supabase JWT validation failed');
+        throw new UnauthorizedException(
+          'Invalid or expired authentication token',
+        );
       }
-
-      return [{ name: prefix.toLowerCase(), userPoolId, clientId }];
-    });
+      this.logger.error('Supabase JWT signing keys could not be retrieved');
+      throw new ServiceUnavailableException(
+        'Authentication provider is temporarily unavailable',
+      );
+    }
   }
 }

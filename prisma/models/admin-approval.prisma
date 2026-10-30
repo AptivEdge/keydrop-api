@@ -1,0 +1,27 @@
+enum AdminApprovalStatus {
+  pending
+  approved
+  rejected
+  expired
+}
+
+model AdminApproval {
+  id            String               @id @default(cuid())
+  action        String
+  targetType    String
+  targetId      String
+  reason        String
+  details       Json
+  status        AdminApprovalStatus  @default(pending)
+  requestedById String
+  reviewedById  String?
+  expiresAt     DateTime
+  reviewedAt    DateTime?
+  createdAt     DateTime             @default(now())
+
+  requestedBy User  @relation("ApprovalRequester", fields: [requestedById], references: [id], onDelete: Restrict)
+  reviewedBy  User? @relation("ApprovalReviewer", fields: [reviewedById], references: [id], onDelete: Restrict)
+
+  @@index([status, expiresAt])
+  @@index([requestedById, createdAt])
+}

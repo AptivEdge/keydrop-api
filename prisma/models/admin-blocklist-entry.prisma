@@ -1,0 +1,19 @@
+enum AdminBlocklistKind {
+  account
+  email_domain
+}
+
+model AdminBlocklistEntry {
+  id          String             @id @default(cuid())
+  kind        AdminBlocklistKind
+  value       String
+  reason      String
+  expiresAt   DateTime?
+  createdById String
+  createdAt   DateTime           @default(now())
+
+  createdBy User @relation("BlocklistCreator", fields: [createdById], references: [id], onDelete: Restrict)
+
+  @@unique([kind, value])
+  @@index([kind, expiresAt])
+}
