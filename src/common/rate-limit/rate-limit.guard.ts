@@ -31,15 +31,19 @@ export class RateLimitGuard implements CanActivate {
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
-    const policy = this.reflector.getAllAndOverride<RateLimitPolicy>(
+    const configuredPolicy = this.reflector.getAllAndOverride<RateLimitPolicy>(
       RATE_LIMIT_KEY,
       [context.getHandler(), context.getClass()],
     );
-    if (!policy) {
+    if (!configuredPolicy) {
       return true;
     }
 
     const request = context.switchToHttp().getRequest<RateLimitedRequest>();
+    const policy =
+      configuredPolicy === 'secret_create' && !request.user?.userId
+        ? 'anonymous_secret_create'
+        : configuredPolicy;
     const key = this.getClientKey(request);
     const result = await this.rateLimit.consume(policy, key);
     if (!result.allowed) {

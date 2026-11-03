@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   NotFoundException,
@@ -12,19 +13,80 @@ const ciphertext = Buffer.from('encrypted-ciphertext').toString('base64url');
 const iv = Buffer.alloc(12).toString('base64url');
 
 describe('SecretsService', () => {
-  it('rejects anonymous secret creation', async () => {
-    const secretCreate = vi.fn();
-    const prisma = { secret: { create: secretCreate } };
+  it('creates an unowned anonymous secret and records its creation', async () => {
+    const created = {
+      id: 'A1b2C3d4E5f6G7h8I9j0K1',
+      status: 'active',
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+      maxViews: 3,
+    };
+    const secretCreate = vi.fn().mockResolvedValue(created);
+    const auditCreate = vi.fn().mockResolvedValue({});
+    const prisma = {
+      $transaction: vi.fn((callback: (tx: unknown) => Promise<unknown>) =>
+        callback({
+          secret: { create: secretCreate },
+          auditEvent: { create: auditCreate },
+        }),
+      ),
+    };
     const service = new SecretsService(
       prisma as never,
-      {} as never,
+      { get: vi.fn() } as never,
       {} as never,
       {} as never,
     );
 
-    await expect(service.createAnonymous()).rejects.toBeInstanceOf(
-      ForbiddenException,
+    await expect(service.createAnonymous({
+      ciphertext,
+      iv,
+      kdf: { algorithm: 'HKDF-SHA-256' },
+      max_views: 3,
+      expires_in: 60 * 60,
+    })).resolves.toMatchObject({
+      id: created.id,
+      max_views: 3,
+      status: 'active',
+    });
+
+    expect(secretCreate.mock.calls[0]?.[0].data).toEqual(
+      expect.objectContaining({ ownerId: null, maxViews: 3 }),
     );
+    expect(auditCreate).toHaveBeenCalledWith({
+      data: {
+        eventType: 'secret_created',
+        secretId: created.id,
+        actorId: null,
+      },
+    });
+  });
+
+  it('rejects anonymous account-only options and limits', async () => {
+    const secretCreate = vi.fn();
+    const prisma = {
+      secret: { create: secretCreate },
+      $transaction: vi.fn(),
+    };
+    const service = new SecretsService(
+      prisma as never,
+      { get: vi.fn() } as never,
+      {} as never,
+      {} as never,
+    );
+    const validPayload = {
+      ciphertext,
+      iv,
+      kdf: { algorithm: 'HKDF-SHA-256' as const },
+      max_views: 1,
+      expires_in: 60 * 60,
+    };
+
+    await expect(service.createAnonymous({ ...validPayload, auth: 'abc' }))
+      .rejects.toBeInstanceOf(BadRequestException);
+    await expect(service.createAnonymous({ ...validPayload, max_views: 6 }))
+      .rejects.toBeInstanceOf(BadRequestException);
+    await expect(service.createAnonymous({ ...validPayload, expires_in: 86401 }))
+      .rejects.toBeInstanceOf(ConflictException);
     expect(secretCreate).not.toHaveBeenCalled();
   });
 

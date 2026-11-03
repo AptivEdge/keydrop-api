@@ -42,7 +42,7 @@ export class SecretsController {
   @RequireApiKeyScope('secrets:write')
   @RateLimit('secret_create')
   @ApiOperation({
-    summary: 'Create a secret on an active Pro or Team subscription',
+    summary: 'Create an anonymous or account-owned secret',
     security: [{ supabase: [] }, {}],
   })
   @ApiResponse({
@@ -60,21 +60,22 @@ export class SecretsController {
   ) {
     return user
       ? this.secrets.create(user, dto)
-      : this.secrets.createAnonymous();
+      : this.secrets.createAnonymous(dto);
   }
 
   @Public()
   @Post('anonymous')
   @RateLimit('anonymous_secret_create')
   @ApiOperation({
-    summary: 'Disabled: anonymous secret creation is unavailable',
+    summary: 'Create a limited anonymous secret',
   })
   @ApiResponse({
-    status: 403,
-    description: 'Anonymous secret creation is unavailable.',
+    status: 201,
+    description: 'Returns the public id and secret settings.',
+    schema: secretMetadataSchema(),
   })
-  createAnonymous() {
-    return this.secrets.createAnonymous();
+  createAnonymous(@Body() dto: CreateSecretDto) {
+    return this.secrets.createAnonymous(dto);
   }
 
   @Public()

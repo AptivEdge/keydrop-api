@@ -15,6 +15,8 @@ model User {
   adminUser           AdminUser?
   createdTeams        Team[]              @relation("TeamCreator")
   teamMembers         TeamMember[]
+  encryptionKey       UserEncryptionKey?
+  teamSecretKeys      TeamSecretKey[]
   secrets             Secret[]
   auditEvents         AuditEvent[]        @relation("AuditActor")
   adminAuditEvents    AdminAuditLog[]     @relation("AdminAuditActor")

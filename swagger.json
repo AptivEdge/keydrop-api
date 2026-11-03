@@ -1314,7 +1314,7 @@
           },
           {}
         ],
-        "summary": "Create a secret on an active Pro or Team subscription",
+        "summary": "Create an anonymous or account-owned secret",
         "tags": [
           "Secrets"
         ]
@@ -1324,12 +1324,64 @@
       "post": {
         "operationId": "SecretsController_createAnonymous",
         "parameters": [],
-        "responses": {
-          "403": {
-            "description": "Anonymous secret creation is unavailable."
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSecretDto"
+              }
+            }
           }
         },
-        "summary": "Disabled: anonymous secret creation is unavailable",
+        "responses": {
+          "201": {
+            "description": "Returns the public id and secret settings.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "id",
+                    "status",
+                    "expires_at",
+                    "max_views"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "label": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "active",
+                        "partially_viewed",
+                        "viewed",
+                        "expired",
+                        "revoked",
+                        "locked"
+                      ]
+                    },
+                    "max_views": {
+                      "type": "integer",
+                      "nullable": true
+                    },
+                    "expires_at": {
+                      "type": "string",
+                      "format": "date-time",
+                      "nullable": true
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "summary": "Create a limited anonymous secret",
         "tags": [
           "Secrets"
         ]
@@ -2224,6 +2276,306 @@
           }
         ],
         "summary": "List teams for the authenticated user",
+        "tags": [
+          "Teams"
+        ]
+      }
+    },
+    "/api/v1/teams/encryption-key": {
+      "get": {
+        "operationId": "TeamsController_getEncryptionKey",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "security": [
+          {
+            "supabase": []
+          }
+        ],
+        "tags": [
+          "Teams"
+        ]
+      },
+      "post": {
+        "operationId": "TeamsController_registerEncryptionKey",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserEncryptionKeyDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": ""
+          }
+        },
+        "security": [
+          {
+            "supabase": []
+          }
+        ],
+        "tags": [
+          "Teams"
+        ]
+      }
+    },
+    "/api/v1/teams/{id}/encryption-keys": {
+      "get": {
+        "operationId": "TeamsController_memberEncryptionKeys",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "security": [
+          {
+            "supabase": []
+          }
+        ],
+        "tags": [
+          "Teams"
+        ]
+      }
+    },
+    "/api/v1/teams/{id}/secrets": {
+      "get": {
+        "operationId": "TeamsController_teamSecrets",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "security": [
+          {
+            "supabase": []
+          }
+        ],
+        "tags": [
+          "Teams"
+        ]
+      },
+      "post": {
+        "operationId": "TeamsController_createTeamSecret",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTeamSecretDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": ""
+          }
+        },
+        "security": [
+          {
+            "supabase": []
+          }
+        ],
+        "tags": [
+          "Teams"
+        ]
+      }
+    },
+    "/api/v1/teams/{id}/secrets/{secretId}/reveal": {
+      "post": {
+        "operationId": "TeamsController_revealTeamSecret",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "secretId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "security": [
+          {
+            "supabase": []
+          }
+        ],
+        "tags": [
+          "Teams"
+        ]
+      }
+    },
+    "/api/v1/teams/{id}/secrets/{secretId}/key": {
+      "get": {
+        "operationId": "TeamsController_teamSecretKey",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "secretId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "security": [
+          {
+            "supabase": []
+          }
+        ],
+        "tags": [
+          "Teams"
+        ]
+      }
+    },
+    "/api/v1/teams/{id}/secrets/{secretId}/keys/{targetUserId}": {
+      "post": {
+        "operationId": "TeamsController_shareTeamSecretKey",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "secretId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "targetUserId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ShareTeamSecretKeyDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": ""
+          }
+        },
+        "security": [
+          {
+            "supabase": []
+          }
+        ],
+        "tags": [
+          "Teams"
+        ]
+      }
+    },
+    "/api/v1/teams/{id}/secrets/{secretId}": {
+      "delete": {
+        "operationId": "TeamsController_revokeTeamSecret",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "secretId",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": ""
+          }
+        },
+        "security": [
+          {
+            "supabase": []
+          }
+        ],
         "tags": [
           "Teams"
         ]
@@ -6258,6 +6610,65 @@
         ]
       },
       "Object": {
+        "type": "object",
+        "properties": {}
+      },
+      "UserEncryptionKeyDto": {
+        "type": "object",
+        "properties": {}
+      },
+      "CreateTeamSecretDto": {
+        "type": "object",
+        "properties": {
+          "ciphertext": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 350000,
+            "description": "Base64url-encoded ciphertext produced by the client."
+          },
+          "iv": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "kdf": {
+            "$ref": "#/components/schemas/KdfDto"
+          },
+          "auth": {
+            "type": "string",
+            "maxLength": 128,
+            "description": "Client-derived auth value; the passphrase is never sent."
+          },
+          "label": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "max_views": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "description": "Maximum views are enforced by the account plan."
+          },
+          "expires_in": {
+            "type": "integer",
+            "minimum": 60,
+            "maximum": 2592000,
+            "description": "Expiry duration in seconds; enforced by the account plan."
+          },
+          "recipient_email": {
+            "type": "string",
+            "format": "email",
+            "maxLength": 320
+          }
+        },
+        "required": [
+          "ciphertext",
+          "iv",
+          "kdf",
+          "expires_in"
+        ]
+      },
+      "ShareTeamSecretKeyDto": {
         "type": "object",
         "properties": {}
       },

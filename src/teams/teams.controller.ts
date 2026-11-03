@@ -2,7 +2,11 @@ import {
   Body,
   Controller,
   Delete,
+  ForbiddenException,
   Get,
+  Header,
+  HttpCode,
+  HttpStatus,
   Param,
   Patch,
   Post,
@@ -21,6 +25,11 @@ import {
   TeamPolicyDto,
 } from './dto/team.dto.js';
 import { RateLimit } from '../common/rate-limit/rate-limit.decorator.js';
+import {
+  CreateTeamSecretDto,
+  ShareTeamSecretKeyDto,
+  UserEncryptionKeyDto,
+} from './dto/team-vault.dto.js';
 import {
   ApiBearerAuth,
   ApiOperation,
@@ -94,6 +103,119 @@ export class TeamsController {
     @Query() query: CursorPaginationDto,
   ) {
     return this.teams.listForUser(user.userId, query.cursor, query.limit);
+  }
+
+  @Get('encryption-key')
+  @Header('Cache-Control', 'no-store')
+  @RequireApiKeyScope('teams:read')
+  getEncryptionKey(@CurrentUser() user: AuthenticatedUser) {
+    if (user.authMethod === 'api-key') {
+      throw new ForbiddenException(
+        'Encryption key recovery requires an account session',
+      );
+    }
+    return this.teams.getEncryptionKey(user.userId);
+  }
+
+  @Post('encryption-key')
+  @Header('Cache-Control', 'no-store')
+  @RequireApiKeyScope('teams:write')
+  registerEncryptionKey(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: UserEncryptionKeyDto,
+  ) {
+    if (user.authMethod === 'api-key') {
+      throw new ForbiddenException(
+        'Encryption key setup requires an account session',
+      );
+    }
+    return this.teams.registerEncryptionKey(
+      user.userId,
+      body.publicKey,
+      body.encryptedPrivateKey,
+    );
+  }
+
+  @Get(':id/encryption-keys')
+  @Header('Cache-Control', 'no-store')
+  @RequireApiKeyScope('teams:read')
+  memberEncryptionKeys(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') teamId: string,
+  ) {
+    return this.teams.listMemberEncryptionKeys(user.userId, teamId);
+  }
+
+  @Get(':id/secrets')
+  @Header('Cache-Control', 'no-store')
+  @RequireApiKeyScope('teams:read')
+  teamSecrets(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') teamId: string,
+  ) {
+    return this.teams.listTeamSecrets(user.userId, teamId);
+  }
+
+  @Post(':id/secrets')
+  @RequireApiKeyScope('teams:write')
+  @RateLimit('secret_create')
+  createTeamSecret(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') teamId: string,
+    @Body() body: CreateTeamSecretDto,
+  ) {
+    return this.teams.createTeamSecret(user.userId, teamId, body);
+  }
+
+  @Post(':id/secrets/:secretId/reveal')
+  @Header('Cache-Control', 'no-store')
+  @RequireApiKeyScope('teams:read')
+  @HttpCode(HttpStatus.OK)
+  revealTeamSecret(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') teamId: string,
+    @Param('secretId') secretId: string,
+  ) {
+    return this.teams.revealTeamSecret(user.userId, teamId, secretId);
+  }
+
+  @Get(':id/secrets/:secretId/key')
+  @Header('Cache-Control', 'no-store')
+  @RequireApiKeyScope('teams:read')
+  teamSecretKey(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') teamId: string,
+    @Param('secretId') secretId: string,
+  ) {
+    return this.teams.getTeamSecretKey(user.userId, teamId, secretId);
+  }
+
+  @Post(':id/secrets/:secretId/keys/:targetUserId')
+  @RequireApiKeyScope('teams:write')
+  shareTeamSecretKey(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') teamId: string,
+    @Param('secretId') secretId: string,
+    @Param('targetUserId') targetUserId: string,
+    @Body() body: ShareTeamSecretKeyDto,
+  ) {
+    return this.teams.shareTeamSecretKey(
+      user.userId,
+      teamId,
+      secretId,
+      targetUserId,
+      body.envelope,
+    );
+  }
+
+  @Delete(':id/secrets/:secretId')
+  @RequireApiKeyScope('teams:write')
+  revokeTeamSecret(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') teamId: string,
+    @Param('secretId') secretId: string,
+  ) {
+    return this.teams.revokeTeamSecret(user.userId, teamId, secretId);
   }
 
   @Get(':id')

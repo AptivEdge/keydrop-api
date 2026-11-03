@@ -5,16 +5,40 @@ on:
   push:
     branches:
       - '**'
+  workflow_dispatch:
+    inputs:
+      confirm_production_migration:
+        description: Confirm applying pending migrations to the production database
+        type: choice
+        options:
+          - skip
+          - migrate
+        default: skip
+        required: true
 
 permissions:
   contents: read
 
 jobs:
   validate:
-    name: Test and build
+    name: Migrate, test, and build
     runs-on: ubuntu-latest
     env:
-      DATABASE_URL: postgresql://keydrop:ci-only@127.0.0.1:5432/keydrop
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/keydrop?schema=public
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: keydrop
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d keydrop"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
 
     steps:
       - name: Check out source
@@ -32,6 +56,9 @@ jobs:
       - name: Validate Prisma schema
         run: npx prisma validate --config prisma7.config.ts
 
+      - name: Apply migrations to CI database
+        run: npx prisma migrate deploy --config prisma7.config.ts
+
       - name: Generate Prisma client
         run: npx prisma generate --config prisma7.config.ts
 
@@ -43,3 +70,31 @@ jobs:
 
       - name: Build application
         run: npm run build
+
+  production-migrate:
+    name: Apply production migrations
+    if: github.event_name == 'workflow_dispatch' && inputs.confirm_production_migration == 'migrate'
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check production database secret
+        run: test -n "$DATABASE_URL"
+
+      - name: Apply migrations to production database
+        run: npx prisma migrate deploy --config prisma7.config.ts

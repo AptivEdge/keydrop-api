@@ -9,10 +9,24 @@ model Team {
 
   creator     User             @relation("TeamCreator", fields: [createdBy], references: [id], onDelete: Restrict)
   members     TeamMember[]
+  secrets     Secret[]
   policies    Policy[]         @relation("TeamPolicies")
   invitations TeamInvitation[]
 
   @@index([createdBy])
+}
+
+model TeamSecretKey {
+  secretId String
+  userId   String
+  envelope Json
+  createdAt DateTime @default(now())
+
+  secret Secret @relation(fields: [secretId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([secretId, userId])
+  @@index([userId, createdAt])
 }
 
 model TeamMember {

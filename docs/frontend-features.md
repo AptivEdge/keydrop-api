@@ -55,10 +55,12 @@ for login.
 
 ### 2.2 Create and reveal a secret
 
-1. Create a secret only with a Pro or Team account: call `POST /secrets` with
-   a Supabase Auth access token or a Pro/Team API key scoped `secrets:write`.
-   Requests without an authenticated paid account receive `403 Forbidden`.
-   `POST /secrets/anonymous` is disabled and also returns `403 Forbidden`.
+1. For anonymous sharing, call `POST /secrets/anonymous` without
+   authentication. Anonymous secrets support up to 16 KB of plaintext, 5
+   views, and 24 hours of expiry; passphrases, labels, and recipient email
+   verification are unavailable. Anonymous creation is rate-limited.
+   Account-owned secrets use `POST /secrets` with a Supabase Auth access token
+   or a Pro/Team API key scoped `secrets:write`.
 2. Encrypt the secret in the client before sending it. The API persists
    ciphertext references and encryption metadata, not plaintext or a decryption
    key. The client must retain/provide the decryption material through its
@@ -165,8 +167,8 @@ explicitly permits a scoped key.
 
 | Method | Route                                 | Access / scope                | Purpose                                        |
 | ------ | ------------------------------------- | ----------------------------- | ---------------------------------------------- |
-| `POST` | `/secrets`                            | Pro/Team user / `secrets:write` | Create an account-owned secret requiring an active paid plan |
-| `POST` | `/secrets/anonymous`                  | Public (disabled)             | Returns 403; anonymous creation is unavailable |
+| `POST` | `/secrets`                            | Optional; Pro/Team for account ownership | Create an anonymous or account-owned secret |
+| `POST` | `/secrets/anonymous`                  | Public                         | Create a limited anonymous secret |
 | `GET`  | `/secrets/:id/meta`                   | Public                        | Read metadata without consuming a view         |
 | `POST` | `/secrets/:id/access/request`         | Public                        | Request recipient email access                 |
 | `POST` | `/secrets/:id/reveal`                 | Public                        | Consume a view and retrieve encrypted material |

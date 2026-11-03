@@ -1,8 +1,8 @@
 # Keydrop — Backend Specification
 
-> Historical design notes. Anonymous secret creation and Free-plan secret
-> creation described below are retired. Current creation requires an
-> authenticated Pro or Team plan; see `frontend-features.md`.
+> Historical design notes. Anonymous sharing is currently supported through
+> `POST /secrets/anonymous` with the limits in `frontend-features.md`. Account
+> secret creation requires an authenticated Pro or Team plan.
 
 Source of truth · v1.0 draft · October 15, 2026 · Owner: Product and Engineering
 
@@ -212,6 +212,17 @@ The requester's browser generates an ECDH P-256 key pair and stores the public k
 | Settings, status, counters, timestamps             | URL fragment                          |
 | Owner id, optional label, optional recipient email | File contents                         |
 | Coarse region and HMAC of IP                       | Raw IP after the log retention window |
+| Public P-256 member keys and recovery-wrapped private-key backups | Recovery phrase or unwrapped private key |
+| Per-secret, per-member ECDH/AES-GCM key envelopes | Team secret content key               |
+
+Team vault keys use ephemeral P-256 ECDH, HKDF-SHA-256, and AES-GCM in the
+browser. Each team member receives an independent envelope. The member private
+key backup is encrypted locally with an Argon2id-derived AES-GCM key; only that
+ciphertext, its random salt, and KDF parameters are registered. Recovery
+phrases are never sent to the API. New members receive envelopes only for
+secrets created after they join; owners and admins can explicitly re-share
+older secrets. Removing a member deletes their server-side envelopes but cannot
+erase keys or plaintext they already obtained.
 
 ### 4.10 Threat model
 
@@ -478,6 +489,21 @@ Current team routes:
 | `PATCH`  | `/api/v1/teams/:id`                   | Owner or Admin                |
 | `PATCH`  | `/api/v1/teams/:id/members/:memberId` | Owner or Admin                |
 | `DELETE` | `/api/v1/teams/:id/members/:memberId` | Owner or Admin                |
+| `GET`    | `/api/v1/teams/encryption-key`        | Account session; encrypted backup |
+| `POST`   | `/api/v1/teams/encryption-key`        | Account session; once         |
+| `GET`    | `/api/v1/teams/:id/encryption-keys`   | Team member; public keys only |
+| `GET`    | `/api/v1/teams/:id/secrets`           | Team member; metadata only    |
+| `POST`   | `/api/v1/teams/:id/secrets`           | Team member; browser-encrypted content and one envelope per member |
+| `POST`   | `/api/v1/teams/:id/secrets/:secretId/reveal` | Member with an envelope; consumes a view |
+| `GET`    | `/api/v1/teams/:id/secrets/:secretId/key` | Member with an envelope; returns only that member's envelope |
+| `POST`   | `/api/v1/teams/:id/secrets/:secretId/keys/:targetUserId` | Owner or Admin; explicitly re-shares an older secret |
+| `DELETE` | `/api/v1/teams/:id/secrets/:secretId` | Owner or Admin; revokes the team secret |
+
+The Team plan supports team-owned secrets up to 256 KiB, 100 views, and 30
+days' expiry, with a maximum of 200 members per team. Personal secrets are not
+associated with a team. Every current member must register a public encryption
+key before a new team secret can be created. API-key authentication cannot read
+or register a member's encrypted private-key backup.
 
 Team invitations are now persisted in `TeamInvitation`, with SHA-256 token
 hashes, seven-day expiry, single-use acceptance, revocation, and email delivery

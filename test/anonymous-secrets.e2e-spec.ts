@@ -1,5 +1,4 @@
 import {
-  ForbiddenException,
   INestApplication,
   ValidationPipe,
 } from '@nestjs/common';
@@ -13,20 +12,19 @@ import { RecipientAccessService } from '../src/secrets/recipient-access.service.
 import { SecretsController } from '../src/secrets/secrets.controller.js';
 import { SecretsService } from '../src/secrets/secrets.service.js';
 
-describe('Paid-only secret creation (e2e)', () => {
+describe('Anonymous secret creation (e2e)', () => {
   let app: INestApplication<App> | undefined;
   let createAnonymous: ReturnType<typeof vi.fn>;
   let rateLimitConsume: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
     const rateLimitBuckets = new Map<string, number>();
-    createAnonymous = vi
-      .fn()
-      .mockRejectedValue(
-        new ForbiddenException(
-          'Creating secrets requires an authenticated Pro or Team subscription',
-        ),
-      );
+    createAnonymous = vi.fn().mockResolvedValue({
+      id: 'A1b2C3d4E5f6G7h8I9j0K1',
+      status: 'active',
+      expires_at: new Date(Date.now() + 60 * 60 * 1000),
+      max_views: 3,
+    });
     rateLimitConsume = vi.fn(async (_policy: string, key: string) => {
       const attempts = rateLimitBuckets.get(key) ?? 0;
       if (attempts >= 3) {
@@ -71,30 +69,40 @@ describe('Paid-only secret creation (e2e)', () => {
     await app?.close();
   });
 
-  it('rejects anonymous secret creation through the legacy endpoint', async () => {
+  it('creates anonymous secrets through the dedicated endpoint', async () => {
     const response = await request(app!.getHttpServer())
       .post('/api/v1/secrets/anonymous')
       .set('User-Agent', 'anonymous-secrets-e2e')
-      .send(validSecret());
+      .send(validSecret())
+      .expect(201);
 
-    expect(response.status).toBe(403);
-    expect(response.body).toEqual({
-      statusCode: 403,
-      message:
-        'Creating secrets requires an authenticated Pro or Team subscription',
-      error: 'Forbidden',
-    });
+    expect(response.body).toEqual(
+      expect.objectContaining({
+        id: 'A1b2C3d4E5f6G7h8I9j0K1',
+        max_views: 3,
+      }),
+    );
     expect(createAnonymous).toHaveBeenCalledOnce();
+    expect(createAnonymous).toHaveBeenCalledWith(validSecret());
+    expect(rateLimitConsume).toHaveBeenCalledWith(
+      'anonymous_secret_create',
+      expect.any(String),
+    );
   });
 
-  it('rejects unauthenticated creation through the main endpoint', async () => {
+  it('creates a limited anonymous secret through the optional-auth endpoint', async () => {
     const response = await request(app!.getHttpServer())
       .post('/api/v1/secrets')
       .set('User-Agent', 'unauthenticated-secret-e2e')
-      .send(validSecret());
+      .send(validSecret())
+      .expect(201);
 
-    expect(response.status).toBe(403);
     expect(createAnonymous).toHaveBeenCalledOnce();
+    expect(response.body.max_views).toBe(3);
+    expect(rateLimitConsume).toHaveBeenCalledWith(
+      'anonymous_secret_create',
+      expect.any(String),
+    );
   });
 
   it('validates anonymous secret requests before reaching the service', async () => {
@@ -107,11 +115,11 @@ describe('Paid-only secret creation (e2e)', () => {
     expect(createAnonymous).not.toHaveBeenCalled();
   });
 
-  it('rate limits repeated rejected creation requests by client and device', async () => {
+  it('rate limits anonymous creation requests by client and device', async () => {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       await createRequest('anonymous-secrets-abuse-e2e')
         .send(validSecret())
-        .expect(403);
+        .expect(201);
     }
 
     const limitedResponse = await createRequest('anonymous-secrets-abuse-e2e')
@@ -127,7 +135,7 @@ describe('Paid-only secret creation (e2e)', () => {
 
     await createRequest('anonymous-secrets-other-device-e2e')
       .send(validSecret())
-      .expect(403);
+      .expect(201);
     expect(createAnonymous).toHaveBeenCalledTimes(4);
     expect(rateLimitConsume).toHaveBeenCalled();
   });

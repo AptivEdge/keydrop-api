@@ -16,7 +16,7 @@ export async function createApplication(): Promise<NestExpressApplication> {
     rawBody: true,
     bodyParser: false,
   });
-  app.use(json({ limit: 400_000, verify: captureRawBody }));
+  app.use(json({ limit: 600_000, verify: captureRawBody }));
   app.use(urlencoded({ extended: true, limit: 400_000 }));
   const config = app.get(ConfigService);
   const logger = app.get(LoggerService);
@@ -190,7 +190,8 @@ function validateRuntimeConfiguration(config: ConfigService): void {
 
 if (
   process.argv[1] &&
-  fileURLToPath(import.meta.url) === path.resolve(process.argv[1])
+  path.parse(fileURLToPath(import.meta.url)).name ===
+    path.parse(process.argv[1]).name
 ) {
   void bootstrap().catch((error: unknown) => {
     const logger = new Logger('Bootstrap');

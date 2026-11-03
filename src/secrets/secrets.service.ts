@@ -85,10 +85,29 @@ export class SecretsService {
     return createResponse(result);
   }
 
-  async createAnonymous(): Promise<never> {
-    throw new ForbiddenException(
-      'Creating secrets requires an authenticated Pro or Team subscription',
-    );
+  async createAnonymous(dto: CreateSecretDto) {
+    if (dto.auth || dto.label?.trim() || dto.recipient_email?.trim()) {
+      throw new BadRequestException(
+        'Anonymous secrets do not support passphrases, labels, or recipient email verification',
+      );
+    }
+
+    const data = validateCreate(dto, 'anonymous', this.config);
+    const result = await this.prisma.$transaction(async (tx) => {
+      const secret = await tx.secret.create({
+        data: { ...data, id: generatePublicId(), ownerId: null },
+        select: metaSelect,
+      });
+      await tx.auditEvent.create({
+        data: {
+          eventType: 'secret_created',
+          secretId: secret.id,
+          actorId: null,
+        },
+      });
+      return secret;
+    });
+    return createResponse(result);
   }
 
   async getMeta(id: string) {
@@ -878,7 +897,8 @@ function validateCreate(
     throw new BadRequestException('iv must encode exactly 12 random bytes');
   }
 
-  const maxPaddedBytes = 256 * 1024 + 4;
+  const isAnonymous = plan === 'anonymous';
+  const maxPaddedBytes = isAnonymous ? 64 * 1024 : 256 * 1024 + 4;
   if (encryptedBytes.length > maxPaddedBytes + 16) {
     throw new BadRequestException(
       `Ciphertext exceeds the ${plan} plan size limit`,
@@ -886,7 +906,7 @@ function validateCreate(
   }
 
   validateKdf(dto.kdf, dto.auth);
-  const maxAllowedViews = 100;
+  const maxAllowedViews = isAnonymous ? 5 : 100;
   const maxViews = dto.max_views ?? 1;
   if (
     !Number.isInteger(maxViews) ||
@@ -898,7 +918,7 @@ function validateCreate(
     );
   }
 
-  const maxExpirySeconds = 30 * 86400;
+  const maxExpirySeconds = isAnonymous ? 24 * 60 * 60 : 30 * 86400;
   if (
     !Number.isInteger(dto.expires_in) ||
     dto.expires_in < 60 ||
