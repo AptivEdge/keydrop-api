@@ -53,14 +53,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Validate Prisma schema
-        run: npx prisma validate --config prisma7.config.ts
-
-      - name: Apply migrations to CI database
+      # (Optional) If you still want to validate or test with Prisma locally in CI:
+      - name: Apply migrations to CI database (Prisma or Supabase test)
         run: npx prisma migrate deploy --config prisma7.config.ts
-
-      - name: Generate Prisma client
-        run: npx prisma generate --config prisma7.config.ts
 
       - name: Run tests
         run: npm test
@@ -72,29 +67,30 @@ jobs:
         run: npm run build
 
   production-migrate:
-    name: Apply production migrations
+    name: Apply production migrations to Supabase
     if: github.event_name == 'workflow_dispatch' && inputs.confirm_production_migration == 'migrate'
     needs: validate
     runs-on: ubuntu-latest
     environment: production
-    env:
-      DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
-
     steps:
       - name: Check out source
         uses: actions/checkout@v4
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      # 1. Set up the Supabase CLI
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v3
         with:
-          node-version: '24'
-          cache: npm
+          version: latest
 
-      - name: Install dependencies
-        run: npm ci
+      # 2. Link your Supabase project using an Access Token and Project Reference
+      - name: Link Supabase Project
+        run: supabase link --project-ref gihoxmacletkytkzibsy
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
 
-      - name: Check production database secret
-        run: test -n "$DATABASE_URL"
-
-      - name: Apply migrations to production database
-        run: npx prisma migrate deploy --config prisma7.config.ts
+      # 3. Push migrations natively via Supabase CLI
+      - name: Push migrations to Supabase
+        run: supabase db push
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
