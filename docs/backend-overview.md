@@ -79,9 +79,8 @@ references.
 
 ## 4. Background work
 
-Local and non-serverless deployments run Nest scheduled jobs in the API
-process. The same job handlers are exposed to Supabase Cron on Vercel. Current
-schedules include:
+Supabase Cron is the sole scheduler. It calls protected API job endpoints;
+Nest does not run in-process scheduled jobs. Current schedules include:
 
 | Work                     | Schedule                           | Result                                                                      |
 | ------------------------ | ---------------------------------- | --------------------------------------------------------------------------- |
@@ -92,10 +91,9 @@ schedules include:
 | Notification processing  | Every 5 and 10 minutes             | Creates expiring-secret notifications and delivers opted-in emails          |
 | Billing reconciliation   | Every 30 minutes and every 6 hours | Reconciles provider subscription state and billing reliability workflows    |
 
-Jobs use PostgreSQL and the relevant target providers directly. Vercel disables
-in-process schedules and exposes protected internal-job endpoints for Supabase
-Cron; local and non-serverless runtimes use NestJS scheduling. The runtime does
-not depend on SQS or a separate worker service.
+Jobs use PostgreSQL and the relevant target providers directly. All API
+deployments expose protected internal-job endpoints for Supabase Cron. The
+runtime does not depend on SQS or a separate worker service.
 
 ## 5. Cross-cutting API behavior
 

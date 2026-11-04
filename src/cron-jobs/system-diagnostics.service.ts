@@ -1,6 +1,5 @@
-import { Injectable, Optional } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { SchedulerRegistry } from '@nestjs/schedule';
 import { EMAIL_TEMPLATE_NAMES } from '../email/email-provider.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 
@@ -24,7 +23,6 @@ export class SystemDiagnosticsService {
   constructor(
     private readonly config: ConfigService,
     private readonly prisma: PrismaService,
-    @Optional() private readonly scheduler?: SchedulerRegistry,
   ) {}
 
   async getDiagnostics() {
@@ -45,79 +43,20 @@ export class SystemDiagnosticsService {
   }
 
   private getBackgroundJobs() {
-    if (this.config.get<string>('VERCEL') === '1') {
-      const triggerConfigured = Boolean(
-        this.config.get<string>('INTERNAL_JOBS_TOKEN')?.trim(),
-      );
-      return {
-        state: triggerConfigured ? 'configured' : 'unavailable',
-        mode: 'external',
-        expectedJobs: scheduledJobs.length,
-        registeredJobs: null,
-        lastRunAt: null,
-        nextRunAt: null,
-        jobs: scheduledJobs,
-        message: triggerConfigured
-          ? 'External scheduler mode is configured. The API cannot verify that external triggers are running.'
-          : 'External scheduler mode requires INTERNAL_JOBS_TOKEN and external triggers.',
-      };
-    }
-
-    if (!this.scheduler) {
-      return {
-        state: 'unavailable',
-        mode: 'in-process',
-        expectedJobs: scheduledJobs.length,
-        registeredJobs: 0,
-        lastRunAt: null,
-        nextRunAt: null,
-        jobs: [],
-        message: 'The in-process scheduler is not available.',
-      };
-    }
-
-    const registered = [...this.scheduler.getCronJobs()].map(([key, job]) => {
-      const name = key.split('.').at(-1) ?? key;
-      let nextRunAt: string | null = null;
-      try {
-        nextRunAt = job.nextDate().toISO();
-      } catch {
-        nextRunAt = null;
-      }
-      return {
-        name,
-        running: job.isActive,
-        lastRunAt: job.lastDate()?.toISOString() ?? null,
-        nextRunAt,
-      };
-    });
-    const state =
-      registered.length === scheduledJobs.length &&
-      registered.every((job) => job.running && job.nextRunAt)
-        ? 'healthy'
-        : 'degraded';
-    const lastRunAt = registered
-      .map((job) => job.lastRunAt)
-      .filter((value): value is string => value !== null)
-      .sort()
-      .at(-1) ?? null;
-    const nextRunAt = registered
-      .map((job) => job.nextRunAt)
-      .filter((value): value is string => value !== null)
-      .sort()[0] ?? null;
-
+    const triggerConfigured = Boolean(
+      this.config.get<string>('INTERNAL_JOBS_TOKEN')?.trim(),
+    );
     return {
-      state,
-      mode: 'in-process',
+      state: triggerConfigured ? 'configured' : 'unavailable',
+      mode: 'external',
       expectedJobs: scheduledJobs.length,
-      registeredJobs: registered.length,
-      lastRunAt,
-      nextRunAt,
-      jobs: registered,
-      message:
-        state === 'healthy'
-          ? 'Scheduled jobs are registered and active in this API process.'
-          : 'One or more scheduled jobs are missing, stopped, or have no next run time.',
+      registeredJobs: null,
+      lastRunAt: null,
+      nextRunAt: null,
+      jobs: scheduledJobs,
+      message: triggerConfigured
+        ? 'External scheduler mode is configured. The API cannot verify that external triggers are running.'
+        : 'External scheduler mode requires INTERNAL_JOBS_TOKEN and external triggers.',
     };
   }
 

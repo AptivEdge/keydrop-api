@@ -128,14 +128,14 @@ retention and visibility are not equivalent to durable audit storage.
 
 ### Background work
 
-`@nestjs/schedule` remains enabled for local/non-serverless runtime only and is
-disabled on Vercel. Supabase Cron schedules the same cleanup, notification,
-storage-retry, and billing work by calling allow-listed Vercel job endpoints.
-Each request requires a server-side bearer token stored in Vercel environment
-variables and Supabase Vault. PostgreSQL advisory transaction locks prevent
-overlapping executions of an individual job. The `pg_net` HTTP request is
-asynchronous; operators must check both Cron run history and HTTP response
-records rather than treating a queued request as completed.
+Supabase Cron is the sole scheduler for cleanup, notification, storage-retry,
+and billing work. It calls allow-listed API job endpoints; the API does not run
+in-process scheduled timers. Each request requires a server-side bearer token
+stored in the API environment and Supabase Vault. PostgreSQL advisory
+transaction locks prevent overlapping executions of an individual job. The
+`pg_net` HTTP request is asynchronous; operators must check both Cron run
+history and HTTP response records rather than treating a queued request as
+completed.
 
 Supabase documents Cron as part of its Postgres module and supports schedules
 from once per second to once per year; it recommends no more than eight
@@ -144,8 +144,8 @@ jobs at staggered intervals, with a maximum Vercel function duration of 30
 seconds. Supabase Free projects can pause after one week of inactivity, so this
 must be tested on the selected plan and region and does not remove the
 production eligibility/availability gate. The expected schedule is about
-21,750 HTTP function invocations per 30-day month; verify current provider
-quotas and actual runtime before production.
+21,750 API HTTP invocations per 30-day month; verify current provider quotas
+and actual runtime before production.
 
 The rate limiter stores a sliding-window bucket per policy/client in
 PostgreSQL and serializes updates with transaction-scoped advisory locks, so
@@ -209,7 +209,7 @@ Recheck the current provider pricing and terms before deployment:
 3. Supabase schema migrations run as a controlled release step against the
    intended database connection. Do not reset a production database.
 4. Supabase Vault and Cron schedule authenticated HTTP calls to the protected
-   Vercel job endpoints. Verify each job's schedule, lock behavior, logs, and
+   API job endpoints. Verify each job's schedule, lock behavior, logs, and
    `pg_net` response before relying on it.
 5. Cloudflare DNS directs the dev API hostname to Vercel. Verify health,
    auth, storage, email, billing webhook, logs, and audit events.
