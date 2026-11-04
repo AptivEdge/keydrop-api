@@ -5,7 +5,7 @@ on:
     types: [opened, synchronize, reopened, closed]
   push:
     tags:
-      - 'v*' # Triggers on release tags (e.g., v1.0.0, v2.1.3)
+      - 'v*'
 
 permissions:
   contents: read
