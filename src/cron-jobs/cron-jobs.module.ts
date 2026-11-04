@@ -1,5 +1,4 @@
 import { DynamicModule, Module } from '@nestjs/common';
-import { ScheduleModule } from '@nestjs/schedule';
 import { PrismaModule } from '../prisma/prisma.module.js';
 import { SecretCleanupCronService } from './services/secret-cleanup.cron.service.js';
 import { EmailOtpCleanupCronService } from './services/email-otp-cleanup.cron.service.js';
@@ -22,11 +21,9 @@ import { AdminDeliverabilityService } from './admin-deliverability.service.js';
 @Module({})
 export class CronJobsModule {
   static register(): DynamicModule {
-    const serverless = process.env.VERCEL === '1';
     return {
       module: CronJobsModule,
       imports: [
-        ...(serverless ? [] : [ScheduleModule.forRoot()]),
         PrismaModule,
         LoggerModule,
         StorageModule,

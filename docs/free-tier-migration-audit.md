@@ -123,13 +123,12 @@ classifications, not the current live resource status.
 - **Billing:** Razorpay is not AWS-dependent. Webhooks require the raw body,
   HMAC verification, an event ID, and a unique `(provider, eventId)` database
   constraint. Keep this integration and its test coverage.
-- **Background jobs:** Nest `@Cron` runs hourly, every 10 minutes, every 30
-  minutes, every 6 hours, and daily; jobs cover secret/request cleanup, storage
-  retries, email OTP cleanup, notifications, retention, and billing
-  reconciliation. Vercel Functions do not provide a durable always-on process.
-  The migration adds protected, bounded HTTP entry points, per-job PostgreSQL
-  advisory locks, and Supabase Cron/`pg_net` calls. This scheduling path still
-  requires verification in the target Supabase/Vercel projects before cutover.
+- **Background jobs:** Protected, bounded HTTP entry points execute secret and
+  request cleanup, storage retries, email OTP cleanup, notifications,
+  retention, and billing reconciliation. Supabase Cron/`pg_net` is the sole
+  intended scheduler; in-process Nest schedules have been removed. The external
+  schedule and calls still require verification in the target Supabase/API
+  projects before cutover.
 - **Rate limiting:** policy limits are stored in PostgreSQL sliding-window
   buckets and protected with transaction advisory locks. Bucket identifiers
   are HMAC-hashed with `SECRET_AUTH_PEPPER`; a scheduled job cleans stale rows.
@@ -206,10 +205,10 @@ document or the repository.
 3. Existing S3 objects and identifiers must be copied without exposing private
    objects. Keep S3 enabled until R2 reads, writes, URLs, CORS, and deletion
    retries all pass.
-4. Vercel does not preserve an always-running Nest process. Its scheduled work
-   uses authenticated job endpoints and Supabase Cron/`pg_net`; verify actual
-   HTTP responses, per-job advisory locks, execution duration, Supabase Free
-   inactivity behavior, and current Hobby quotas before cutover.
+4. The API has no in-process scheduler. Scheduled work uses authenticated job
+   endpoints and Supabase Cron/`pg_net`; verify actual HTTP responses, per-job
+   advisory locks, execution duration, Supabase Free inactivity behavior, and
+   API-host limits before cutover.
 5. Verify the PostgreSQL rate limiter's client-IP extraction behind the actual
    Cloudflare/Vercel routing path and observe added database load before
    relying on it for production abuse controls.

@@ -55,7 +55,7 @@ describe('Storage cleanup and retries (e2e)', () => {
       Errors: [{ Key: storageRefs[0], Code: 'InternalError' }],
     } as never);
 
-    await cleanup.cleanupExpiredSecrets();
+    await cleanup.runExpiredSecretCleanup();
 
     expect(prisma.transaction.secret.updateMany).toHaveBeenCalled();
     expect(send).toHaveBeenCalledTimes(1);
@@ -84,7 +84,7 @@ describe('Storage cleanup and retries (e2e)', () => {
     vi.advanceTimersByTime(60_000);
     send.mockRejectedValueOnce(new Error('S3 temporarily unavailable'));
     send.mockRejectedValueOnce(new Error('S3 temporarily unavailable'));
-    await cleanup.retryStorageDeletion();
+    await cleanup.runStorageDeletionRetry();
 
     for (const deletion of prisma.deletions.values()) {
       expect(deletion).toEqual(
@@ -99,7 +99,7 @@ describe('Storage cleanup and retries (e2e)', () => {
 
     vi.advanceTimersByTime(4 * 60_000);
     send.mockResolvedValue({});
-    await cleanup.retryStorageDeletion();
+    await cleanup.runStorageDeletionRetry();
 
     expect(send).toHaveBeenCalledTimes(5);
     for (const deletion of prisma.deletions.values()) {

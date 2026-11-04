@@ -160,11 +160,11 @@ ECS deployment, or AWS rollback are still available.
    process where the runtime allows.
 2. Preserve JSON/body limits, CORS, validation, health route, Swagger policy,
    and raw-body verification for Razorpay webhooks.
-3. Configure Supabase Cron as the scheduler for Vercel functions. Supabase
+3. Configure Supabase Cron as the sole scheduler for the API. Supabase
    Cron/`pg_cron` is part of the Postgres project and supports recurring jobs;
    `pg_net` makes the HTTP calls asynchronously. Confirm the extensions are
    available on the selected project/plan and monitor job and request history.
-   Do not rely on Nest's in-process `@Cron` decorators in Vercel.
+The API does not run in-process scheduled jobs on any host.
 4. The API now stores rate-limit windows in PostgreSQL, shared across Vercel
    instances, and adds a scheduled stale-bucket cleanup. Verify the trusted
    client IP through Cloudflare/Vercel and measure the extra database work.
@@ -181,10 +181,10 @@ ECS deployment, or AWS rollback are still available.
    production fit. The current schedule invokes the function about 21,750 times
    per 30-day month; this is an estimate, not a quota guarantee.
 
-### Configure Supabase Cron for Vercel jobs
+### Configure Supabase Cron for API jobs
 
 Use this only in the intended Supabase development project first. Set
-`INTERNAL_JOBS_TOKEN` as a server-only Vercel environment variable using a
+`INTERNAL_JOBS_TOKEN` as a server-only API environment variable using a
 cryptographically random value. Store that same value and the full job endpoint
 base URL in Supabase Vault through the Dashboard; do not paste production
 secrets into source control or migration files. The base URL includes the
@@ -281,14 +281,14 @@ select cron.schedule('keydrop-rate-limit-cleanup', '8 * * * *',
   $$select private.invoke_keydrop_internal_job('rate-limit-cleanup')$$);
 ```
 
-The Vercel routes are `POST /api/v1/internal/jobs/:job`. They fail closed when
-the bearer token is unset or invalid, return 404 for unknown jobs, and use a
+The API route is `POST /api/v1/internal/jobs/:job`. It fails closed when
+the bearer token is unset or invalid, returns 404 for unknown jobs, and uses a
 PostgreSQL advisory transaction lock to skip overlapping runs of the same job.
-The function has a 30-second Vercel duration cap and the Supabase HTTP request
-times out after 25 seconds. Each operation must remain within this bound.
+The Supabase HTTP request times out after 25 seconds; each job must complete
+within that bound.
 Because `pg_net` is asynchronous, a successful `cron.job_run_details` row
 means only that the request was enqueued. Check `net._http_response` for the
-HTTP status/body and verify a completed job in Vercel runtime logs. Alert
+HTTP status/body and verify a completed job in API runtime logs. Alert
 operators to repeated non-2xx responses and timeouts. Supabase recommends no
 more than eight concurrent jobs and less than ten minutes per job; keep the
 number of concurrently executing requests below that and review actual job

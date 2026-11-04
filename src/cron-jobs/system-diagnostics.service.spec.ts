@@ -21,13 +21,11 @@ describe('SystemDiagnosticsService', () => {
     settings = {},
     databaseFailure = false,
     queueFailure = false,
-    scheduler,
     staleQueue = false,
   }: {
     settings?: Record<string, string>;
     databaseFailure?: boolean;
     queueFailure?: boolean;
-    scheduler?: { getCronJobs: () => Map<string, unknown> };
     staleQueue?: boolean;
   } = {}) {
     const config = {
@@ -49,34 +47,20 @@ describe('SystemDiagnosticsService', () => {
         findFirst: vi.fn().mockResolvedValue({ createdAt }),
       },
     };
-    const service = new SystemDiagnosticsService(
-      config as never,
-      prisma as never,
-      scheduler as never,
-    );
+    const service = new SystemDiagnosticsService(config as never, prisma as never);
     return { service, config, prisma };
   }
 
-  it('reports database latency, queue depth, and email configuration without secrets', async () => {
+  it('reports external jobs, database latency, queue depth, and email configuration without secrets', async () => {
     const settings = {
+      INTERNAL_JOBS_TOKEN: 'internal-secret',
       EMAIL_PROVIDER: 'resend',
       EMAIL_API_KEY: 'must-not-be-returned',
       EMAIL_FROM: 'Keydrop <no-reply@example.com>',
       ...Object.fromEntries(templates.map((name) => [`EMAIL_TEMPLATE_${name}`, 'configured-template'])),
     };
-    const jobs = new Map(
-      Array.from({ length: 10 }, (_, index) => [
-        `service.job${index}`,
-        {
-          isActive: true,
-          lastDate: () => new Date('2026-10-27T00:00:00.000Z'),
-          nextDate: () => ({ toISO: () => '2026-10-27T01:00:00.000Z' }),
-        },
-      ]),
-    );
     const { service, prisma } = createService({
       settings,
-      scheduler: { getCronJobs: () => jobs },
     });
 
     const result = await service.getDiagnostics();
@@ -85,10 +69,10 @@ describe('SystemDiagnosticsService', () => {
     expect(result.queues.emailNotifications).toMatchObject({ pending: 4, due: 2 });
     expect(result.queues.storageDeletions).toMatchObject({ pending: 3, due: 1 });
     expect(result.backgroundJobs).toMatchObject({
-      state: 'healthy',
-      mode: 'in-process',
+      state: 'configured',
+      mode: 'external',
       expectedJobs: 10,
-      registeredJobs: 10,
+      registeredJobs: null,
     });
     expect(result.emailDelivery).toMatchObject({
       state: 'configured',
@@ -130,7 +114,7 @@ describe('SystemDiagnosticsService', () => {
 
   it('reports external job triggers as configured without claiming they are running', async () => {
     const { service } = createService({
-      settings: { VERCEL: '1', INTERNAL_JOBS_TOKEN: 'internal-secret' },
+      settings: { INTERNAL_JOBS_TOKEN: 'internal-secret' },
     });
 
     const result = await service.getDiagnostics();
@@ -143,6 +127,18 @@ describe('SystemDiagnosticsService', () => {
     });
     expect(result.backgroundJobs.message).toContain('cannot verify');
     expect(JSON.stringify(result)).not.toContain('internal-secret');
+  });
+
+  it('reports external job triggers unavailable when their token is missing', async () => {
+    const { service } = createService();
+
+    const result = await service.getDiagnostics();
+
+    expect(result.backgroundJobs).toMatchObject({
+      state: 'unavailable',
+      mode: 'external',
+      expectedJobs: 10,
+    });
   });
 
   it('marks partially configured email delivery as degraded', async () => {

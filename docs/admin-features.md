@@ -161,11 +161,11 @@ identity and operational processes.
   processing. A billing UI should distinguish local pending state from
   provider-confirmed state.
 - `GET /admin/system/diagnostics` is restricted to `ADM`. It checks actual
-  in-process cron registration (or reports external trigger configuration in
-  serverless mode), runs a read-only database probe, summarizes notification
-  and storage-deletion outbox depth/age, and reports email provider
-  configuration without returning secrets or sending mail. External scheduler
-  invocations and provider deliverability are not claimed as verified.
+  external job-trigger configuration, runs a read-only database probe,
+  summarizes notification and storage-deletion outbox depth/age, and reports
+  email provider configuration without returning secrets or sending mail.
+  External scheduler invocations and provider deliverability are not claimed
+  as verified.
 - `GET /admin/v1/deliverability` is available to `ENG` and `ADM`. It reports
   email provider configuration, pending/due/retrying/exhausted notification
   counts, and sanitized retry metadata. It never returns recipients or payloads.

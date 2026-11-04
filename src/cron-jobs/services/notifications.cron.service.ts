@@ -1,5 +1,4 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaService } from '../../prisma/prisma.service.js';
 import { normalizeNotificationPreferences } from '../../common/notifications/notification-preferences.js';
 import { EmailDeliveryService } from '../../teams/email-delivery.service.js';
@@ -13,7 +12,6 @@ export class NotificationsCronService {
     private readonly email: EmailDeliveryService,
   ) {}
 
-  @Cron(CronExpression.EVERY_10_MINUTES)
   async createSecretExpiryNotifications(): Promise<void> {
     const now = new Date();
     const expiringBefore = new Date(now.getTime() + 24 * 60 * 60 * 1000);
@@ -63,7 +61,6 @@ export class NotificationsCronService {
     }
   }
 
-  @Cron(CronExpression.EVERY_5_MINUTES)
   async deliverPendingNotificationEmails(): Promise<void> {
     const notifications = await this.prisma.notification.findMany({
       where: { emailSentAt: null, emailNextAttemptAt: { lte: new Date() } },

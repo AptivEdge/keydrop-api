@@ -60,8 +60,9 @@ Do not point local migration commands at production. The API listens on port
 `http://localhost:4000/api/v1/health`.
 
 Razorpay operations require Test-mode credentials and plan IDs. Application
-logs go to stdout/stderr. Vercel disables in-process Nest schedules; configure
-the protected internal-job endpoints through the documented external scheduler.
+logs go to stdout/stderr. Background jobs run only through the protected
+internal-job endpoints called by Supabase Cron; the API does not run in-process
+schedules.
 
 ## Storage protocol
 

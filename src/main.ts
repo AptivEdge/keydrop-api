@@ -148,10 +148,8 @@ function validateRuntimeConfiguration(config: ConfigService): void {
     'RECIPIENT_ACCESS_TOKEN_SECRET',
     'SECRET_AUTH_PEPPER',
     'FRONTEND_URL',
+    'INTERNAL_JOBS_TOKEN',
   ];
-  if (process.env.VERCEL === '1') {
-    required.push('INTERNAL_JOBS_TOKEN');
-  }
   const authProvider =
     config.get<string>('AUTH_PROVIDER')?.toLowerCase() ?? 'supabase';
   const authRequired =

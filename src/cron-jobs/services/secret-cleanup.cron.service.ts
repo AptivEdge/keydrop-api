@@ -1,5 +1,4 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaService } from '../../prisma/prisma.service.js';
 import { Prisma } from '../../generated/prisma/client.js';
 import { StoragePurgeService } from '../../storage/storage-purge.service.js';
@@ -11,18 +10,6 @@ export class SecretCleanupCronService {
     private readonly prisma: PrismaService,
     private readonly storagePurge: StoragePurgeService,
   ) {}
-
-  @Cron(CronExpression.EVERY_HOUR)
-  async cleanupExpiredSecrets(): Promise<void> {
-    try {
-      await this.runExpiredSecretCleanup();
-    } catch (error: unknown) {
-      this.logger.error(
-        'Expired secret cleanup failed',
-        error instanceof Error ? error.stack : String(error),
-      );
-    }
-  }
 
   async runExpiredSecretCleanup(): Promise<void> {
     const now = new Date();
@@ -90,18 +77,6 @@ export class SecretCleanupCronService {
     });
 
     this.logger.log(`Purged content for ${secrets.length} expired secrets`);
-  }
-
-  @Cron(CronExpression.EVERY_10_MINUTES)
-  async retryStorageDeletion(): Promise<void> {
-    try {
-      await this.runStorageDeletionRetry();
-    } catch (error: unknown) {
-      this.logger.error(
-        'Storage deletion retry failed',
-        error instanceof Error ? error.stack : String(error),
-      );
-    }
   }
 
   async runStorageDeletionRetry(): Promise<void> {
