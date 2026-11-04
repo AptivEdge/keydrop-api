@@ -89,14 +89,25 @@ jobs:
           ref: ${{ github.ref }}
           fetch-depth: 0
 
-      - name: Create pull request to master
-        uses: peter-evans/create-pull-request@v7
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          base: master
-          branch: release/${{ github.ref_name }}
-          title: 'Release ${{ github.ref_name }} to master'
-          body: 'This pull request syncs the changes from release tag `${{ github.ref_name }}` to `master`.'
+      - name: Push tagged commit and create pull request to master
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          branch="release/${RELEASE_TAG}"
+          git push origin "${RELEASE_SHA}:refs/heads/${branch}"
+
+          existing_pr="$(gh pr list --base master --head "${branch}" --state open --json number --jq '.[0].number // empty')"
+          if [ -n "${existing_pr}" ]; then
+            echo "Pull request #${existing_pr} already exists."
+          else
+            gh pr create \
+              --base master \
+              --head "${branch}" \
+              --title "Release ${RELEASE_TAG} to master" \
+              --body "This pull request syncs the changes from release tag \`${RELEASE_TAG}\` to \`master\`."
+          fi
 
   production-migrate:
     name: Apply Production Migrations to Supabase

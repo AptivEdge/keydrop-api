@@ -67,6 +67,13 @@ function setupSwagger(
   app: Parameters<typeof SwaggerModule.createDocument>[0],
   config: ConfigService,
 ): void {
+  if (process.env.NODE_ENV === 'production' || process.env.VERCEL === '1') {
+    console.warn(
+      '[Swagger] Exporting Swagger file is disabled in Vercel or Production environment.',
+    );
+    return;
+  }
+
   const enabled =
     config.get<string>('SWAGGER_ENABLED') !== 'false' &&
     config.get<string>('NODE_ENV') !== 'production';
