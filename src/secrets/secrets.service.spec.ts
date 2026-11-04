@@ -41,6 +41,7 @@ describe('SecretsService', () => {
       ciphertext,
       iv,
       kdf: { algorithm: 'HKDF-SHA-256' },
+      label: 'Temporary access link',
       max_views: 3,
       expires_in: 60 * 60,
     })).resolves.toMatchObject({
@@ -50,7 +51,11 @@ describe('SecretsService', () => {
     });
 
     expect(secretCreate.mock.calls[0]?.[0].data).toEqual(
-      expect.objectContaining({ ownerId: null, maxViews: 3 }),
+      expect.objectContaining({
+        ownerId: null,
+        label: 'Temporary access link',
+        maxViews: 3,
+      }),
     );
     expect(auditCreate).toHaveBeenCalledWith({
       data: {
@@ -61,7 +66,7 @@ describe('SecretsService', () => {
     });
   });
 
-  it('rejects anonymous account-only options and limits', async () => {
+  it('rejects anonymous passphrase and recipient options and limits', async () => {
     const secretCreate = vi.fn();
     const prisma = {
       secret: { create: secretCreate },
@@ -83,6 +88,10 @@ describe('SecretsService', () => {
 
     await expect(service.createAnonymous({ ...validPayload, auth: 'abc' }))
       .rejects.toBeInstanceOf(BadRequestException);
+    await expect(service.createAnonymous({
+      ...validPayload,
+      recipient_email: 'recipient@example.com',
+    })).rejects.toBeInstanceOf(BadRequestException);
     await expect(service.createAnonymous({ ...validPayload, max_views: 6 }))
       .rejects.toBeInstanceOf(BadRequestException);
     await expect(service.createAnonymous({ ...validPayload, expires_in: 86401 }))

@@ -86,9 +86,9 @@ export class SecretsService {
   }
 
   async createAnonymous(dto: CreateSecretDto) {
-    if (dto.auth || dto.label?.trim() || dto.recipient_email?.trim()) {
+    if (dto.auth || dto.recipient_email?.trim()) {
       throw new BadRequestException(
-        'Anonymous secrets do not support passphrases, labels, or recipient email verification',
+        'Anonymous secrets do not support passphrases or recipient email verification',
       );
     }
 
